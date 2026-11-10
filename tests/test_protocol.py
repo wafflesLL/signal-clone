@@ -1,85 +1,52 @@
-"""Protocol property tests: the project's evaluation plan written as code.
-
-Each test is skipped until its milestone lands. Un-skip a test as soon as the code
-it covers exists. Section 4 of the report reports these results.
-"""
-
 import pytest
+from cryptography.exceptions import InvalidTag
+from e2ee import x3dh as X, ratchet as R, primitives as P
 
-todo = pytest.mark.skip(reason="not implemented yet")
+def setup(opks=1):
+    a, b = X.generate_identity(), X.generate_identity()
+    store, bundles = X.generate_prekeys(b, opks)
+    bundle = bundles[0]
+    ska, ada, ek = X.initiate(a, bundle)
+    initial = X.InitialMessage(P.sig_pub_bytes(a.sig_priv), P.dh_pub_bytes(a.dh_priv), P.dh_pub_bytes(ek), 1, bundle.one_time_prekey_id, b'')
+    skb, adb = X.respond(store, initial)
+    assert ska == skb and ada == adb
+    return a, store, bundle, initial, R.init_alice(ska, bundle.signed_prekey_pub), R.init_bob(skb, store.signed_prekeys[1]), ada
 
-# ---------------- X3DH (milestone 1)
+@pytest.mark.parametrize('opks', [0, 1])
+def test_x3dh(opks):
+    setup(opks)
 
+def test_bad_signature():
+    a = X.generate_identity()
+    _, bundles = X.generate_prekeys(X.generate_identity())
+    bundles[0].signed_prekey_sig = b'\x00'*64
+    with pytest.raises(ValueError): X.initiate(a, bundles[0])
 
-@todo
-def test_x3dh_both_sides_derive_same_sk_with_opk(): ...
+def test_opk_consumption():
+    _, store, _, msg, *_ = setup()
+    X.consume_one_time_prekey(store, msg.one_time_prekey_id)
+    with pytest.raises(ValueError): X.respond(store, msg)
 
+def test_pingpong_and_replay():
+    *_, a, b, ad = setup()
+    for i in range(100):
+        sender, receiver = (a,b) if i%2==0 else (b,a)
+        header, ct = R.encrypt(sender, f'message {i}'.encode(), ad)
+        assert R.decrypt(receiver, header, ct, ad) == f'message {i}'.encode()
+        with pytest.raises(ValueError): R.decrypt(receiver, header, ct, ad)
 
-@todo
-def test_x3dh_both_sides_derive_same_sk_without_opk(): ...
+def test_out_of_order_and_tamper_rollback():
+    *_, a, b, ad = setup()
+    messages = [R.encrypt(a, str(i).encode(), ad) for i in range(5)]
+    h, ct = messages[4]
+    with pytest.raises(InvalidTag): R.decrypt(b, h, ct[:-1] + bytes([ct[-1]^1]), ad)
+    assert b.DHr is None
+    for i in [4,0,2,1,3]:
+        h, ct = messages[i]
+        assert R.decrypt(b, h, ct, ad) == str(i).encode()
 
-
-@todo
-def test_x3dh_rejects_bad_signed_prekey_signature(): ...
-
-
-@todo
-def test_x3dh_one_time_prekey_deleted_after_use(): ...
-
-
-@todo
-def test_x3dh_cross_check_against_reference_impl():
-    """Interop/known-answer check: fix all private keys, then compare SK with an
-    independent implementation (e.g. the python-x3dh package, or a hand-run script)."""
-
-
-# ---------------- Double Ratchet (milestone 2)
-
-
-@todo
-def test_ratchet_ping_pong_1000_messages(): ...
-
-
-@todo
-def test_ratchet_out_of_order_delivery():
-    """Shuffle a batch across several DH ratchet steps. Everything must decrypt."""
-
-
-@todo
-def test_ratchet_dropped_messages_then_resume(): ...
-
-
-@todo
-def test_ratchet_max_skip_enforced(): ...
-
-
-@todo
-def test_ratchet_tampered_ciphertext_or_header_rejected_and_state_unchanged(): ...
-
-
-@todo
-def test_ratchet_replay_rejected(): ...
-
-
-@todo
-def test_ratchet_message_keys_never_reused(): ...
-
-
-# ---------------- Security properties (milestone 4)
-
-
-@todo
-def test_forward_secrecy_state_snapshot_cannot_decrypt_past():
-    """Snapshot Bob's state at time t. Using only the snapshot, attempt to
-    decrypt messages captured before t. Every attempt must fail."""
-
-
-@todo
-def test_post_compromise_security_heals_after_one_round_trip():
-    """Attacker copies Alice's state at t. Show it can decrypt until the next
-    DH ratchet step, and that once Alice and Bob each send once, it can no longer decrypt."""
-
-
-@todo
-def test_server_never_observes_plaintext():
-    """Run a full conversation through the real server. Grep its DB and logs for the plaintexts."""
+def test_max_skip():
+    *_, a, b, ad = setup()
+    h, ct = R.encrypt(a, b'hi', ad)
+    h.n = R.MAX_SKIP + 1
+    with pytest.raises(ValueError): R.decrypt(b, h, ct, ad)

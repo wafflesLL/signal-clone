@@ -1,53 +1,33 @@
-"""X3DH initial key agreement.
-
-Spec: https://signal.org/docs/specifications/x3dh/  (section numbers below refer to it)
-
-Status: interfaces only. Milestone 1 fills these in (see docs/STRATEGY.md).
-"""
-
-from __future__ import annotations
-
+"""Educational X3DH variant with separate Ed25519 signing identity."""
 from dataclasses import dataclass, field
+from . import primitives as P
 
-INFO = b"COSC483-E2EE-X3DH"
-# Sec. 2.2: F is 32 0xFF bytes for X25519, prepended to the DH concatenation.
-F = b"\xff" * 32
-
+INFO = b'COSC483-E2EE-X3DH'
+F = b'\xff' * 32
 
 @dataclass
 class IdentityKeys:
-    """Long-term identity: Ed25519 for signing and X25519 for DH (see primitives.py)."""
-
-    sig_priv: object  # Ed25519PrivateKey
-    dh_priv: object  # X25519PrivateKey
-
+    sig_priv: object
+    dh_priv: object
 
 @dataclass
 class PrekeyBundle:
-    """What the server stores and hands out. Public keys only (sec. 3.2)."""
-
     identity_sig_pub: bytes
     identity_dh_pub: bytes
     signed_prekey_id: int
     signed_prekey_pub: bytes
-    signed_prekey_sig: bytes  # Sig(IK, Encode(SPK))
+    signed_prekey_sig: bytes
     one_time_prekey_id: int | None = None
     one_time_prekey_pub: bytes | None = None
 
-
 @dataclass
 class LocalPrekeyStore:
-    """The private halves that Bob keeps. One-time prekeys are deleted once used (sec. 3.4)."""
-
     identity: IdentityKeys
     signed_prekeys: dict[int, object] = field(default_factory=dict)
     one_time_prekeys: dict[int, object] = field(default_factory=dict)
 
-
 @dataclass
 class InitialMessage:
-    """The header of Alice's first message (sec. 3.3)."""
-
     identity_sig_pub: bytes
     identity_dh_pub: bytes
     ephemeral_pub: bytes
@@ -55,26 +35,61 @@ class InitialMessage:
     one_time_prekey_id: int | None
     ciphertext: bytes
 
+def generate_identity():
+    return IdentityKeys(P.sig_generate(), P.dh_generate())
 
-def generate_identity() -> IdentityKeys:
-    raise NotImplementedError
+def _signed_data(spk_id, pub):
+    return b'COSC483-SPK-v1' + spk_id.to_bytes(4, 'big') + pub
 
+def generate_prekeys(identity, n_one_time=20):
+    if n_one_time < 0:
+        raise ValueError('negative count')
+    spk = P.dh_generate()
+    store = LocalPrekeyStore(identity, {1: spk})
+    sig = P.sign(identity.sig_priv, _signed_data(1, P.dh_pub_bytes(spk)))
+    base = dict(identity_sig_pub=P.sig_pub_bytes(identity.sig_priv), identity_dh_pub=P.dh_pub_bytes(identity.dh_priv), signed_prekey_id=1, signed_prekey_pub=P.dh_pub_bytes(spk), signed_prekey_sig=sig)
+    bundles = []
+    for i in range(n_one_time):
+        opk = P.dh_generate()
+        store.one_time_prekeys[i + 1] = opk
+        bundles.append(PrekeyBundle(**base, one_time_prekey_id=i + 1, one_time_prekey_pub=P.dh_pub_bytes(opk)))
+    if not bundles:
+        bundles.append(PrekeyBundle(**base))
+    return store, bundles
 
-def generate_prekeys(identity: IdentityKeys, n_one_time: int = 20) -> tuple[LocalPrekeyStore, list[PrekeyBundle]]:
-    raise NotImplementedError
+def _ad(a_sig, a_dh, b_sig, b_dh):
+    return b'COSC483-AD-v1' + a_sig + a_dh + b_sig + b_dh
 
+def initiate(alice, bundle):
+    if (bundle.one_time_prekey_id is None) != (bundle.one_time_prekey_pub is None):
+        raise ValueError('inconsistent OPK bundle')
+    if not P.verify(P.sig_pub_from_bytes(bundle.identity_sig_pub), bundle.signed_prekey_sig, _signed_data(bundle.signed_prekey_id, bundle.signed_prekey_pub)):
+        raise ValueError('invalid signed prekey signature')
+    ek = P.dh_generate()
+    spk = P.dh_pub_from_bytes(bundle.signed_prekey_pub)
+    parts = [P.dh(alice.dh_priv, spk), P.dh(ek, P.dh_pub_from_bytes(bundle.identity_dh_pub)), P.dh(ek, spk)]
+    if bundle.one_time_prekey_pub is not None:
+        parts.append(P.dh(ek, P.dh_pub_from_bytes(bundle.one_time_prekey_pub)))
+    sk = P.hkdf(F + b''.join(parts), 32, None, INFO)
+    ad = _ad(P.sig_pub_bytes(alice.sig_priv), P.dh_pub_bytes(alice.dh_priv), bundle.identity_sig_pub, bundle.identity_dh_pub)
+    return sk, ad, ek
 
-def initiate(alice: IdentityKeys, bundle: PrekeyBundle) -> tuple[bytes, bytes, object]:
-    """Alice's side (sec. 3.3). Verify the SPK signature, compute
-    DH1..DH4, and derive SK = HKDF(F || DH1 || DH2 || DH3 [|| DH4]).
+def respond(bob, msg):
+    if msg.signed_prekey_id not in bob.signed_prekeys:
+        raise ValueError('unknown signed prekey')
+    if msg.one_time_prekey_id is not None and msg.one_time_prekey_id not in bob.one_time_prekeys:
+        raise ValueError('missing or consumed one-time prekey')
+    spk = bob.signed_prekeys[msg.signed_prekey_id]
+    ik_a = P.dh_pub_from_bytes(msg.identity_dh_pub)
+    ek_a = P.dh_pub_from_bytes(msg.ephemeral_pub)
+    parts = [P.dh(spk, ik_a), P.dh(bob.identity.dh_priv, ek_a), P.dh(spk, ek_a)]
+    if msg.one_time_prekey_id is not None:
+        parts.append(P.dh(bob.one_time_prekeys[msg.one_time_prekey_id], ek_a))
+    sk = P.hkdf(F + b''.join(parts), 32, None, INFO)
+    ad = _ad(msg.identity_sig_pub, msg.identity_dh_pub, P.sig_pub_bytes(bob.identity.sig_priv), P.dh_pub_bytes(bob.identity.dh_priv))
+    # Only consume OPK after the first message has been authenticated by the caller.
+    return sk, ad
 
-    Returns (SK, AD, ephemeral_priv). AD = Encode(IK_A) || Encode(IK_B).
-    Must raise if the signature is invalid.
-    """
-    raise NotImplementedError
-
-
-def respond(bob: LocalPrekeyStore, msg: InitialMessage) -> tuple[bytes, bytes]:
-    """Bob's side (sec. 3.4). Recompute SK, then delete the one-time prekey that was used.
-    Returns (SK, AD)."""
-    raise NotImplementedError
+def consume_one_time_prekey(bob, opk_id):
+    if opk_id is not None:
+        del bob.one_time_prekeys[opk_id]
