@@ -1,0 +1,52 @@
+% COSC 483 Cryptographic Playground report -- ACM Primary Article Template (acmart, sigconf)
+% Build: latexmk -pdf main.tex   (or upload this folder to Overleaf, which ships acmart)
+\documentclass[sigconf,nonacm]{acmart}
+
+\title{A Signal-Style End-to-End Encrypted Messenger: X3DH and the Double Ratchet over an Untrusted Relay}
+
+\author{Liam Loeffel}
+\affiliation{\institution{University of Tennessee, Knoxville}\country{USA}}
+% \author{Teammate}\affiliation{\institution{University of Tennessee, Knoxville}\country{USA}}
+
+\begin{abstract}
+TODO (write last).
+\end{abstract}
+
+\begin{document}
+\maketitle
+
+% ---------------------------------------------------------------- 20 pts
+\section{Introduction}
+% General area -> specific problem -> our approach -> what's different from others.
+
+% ---------------------------------------------------------------- 20 pts
+\section{Background}
+% Threat model of a relay server; forward secrecy vs. post-compromise security;
+% X3DH~\cite{x3dh}; Double Ratchet~\cite{doubleratchet}; primitives (X25519~\cite{rfc7748},
+% Ed25519~\cite{rfc8032}, HKDF~\cite{rfc5869}, AES-GCM); formal analysis~\cite{cohn2017formal}.
+
+% ---------------------------------------------------------------- 20 pts
+\section{System Design}
+% Architecture figure: client / relay server / prekey store. Message flow for first
+% contact and steady state. Trust boundaries. Deviations from Signal (separate
+% Ed25519 identity key instead of XEdDSA).
+
+% ---------------------------------------------------------------- 20 pts
+\section{Implementation and Testing}
+% Module layout, key data structures, state persistence.
+% Correctness: RFC known-answer tests, cross-check vs. a reference implementation,
+% out-of-order/dropped/tampered/replayed messages.
+% Security demos: forward secrecy, post-compromise security, server sees only ciphertext.
+% Table of test results.
+
+% ---------------------------------------------------------------- 20 pts
+\section{Discussion}
+% Lessons learned, limitations (no metadata privacy, trust on first use, single device),
+% future work (safety numbers, groups/MLS, PQXDH).
+
+\section*{Use of AI}
+% Required: how AI was used, and how we checked its output. Transcripts are in transcripts.zip.
+
+\bibliographystyle{ACM-Reference-Format}
+\bibliography{references}
+\end{document}

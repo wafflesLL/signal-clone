@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "e2ee"
+version = "0.1.0"
+description = "COSC 483 Cryptographic Playground: Signal-style E2EE messenger (X3DH + Double Ratchet)"
+requires-python = ">=3.11"
+dependencies = ["cryptography>=43"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+server = ["fastapi", "uvicorn", "httpx"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
