@@ -17,8 +17,8 @@ comment about AI use.
    primitives, then X3DH, then the Double Ratchet, then the transport. The ratchet is
    only debuggable if X3DH is known to be correct. Key-agreement bugs look like "decrypt
    failed" two layers up.
-2. **Every claim in the email maps to a test.** `tests/test_protocol.py` already lists
-   them, skipped for now. "Done" means the test is un-skipped and green.
+2. **Every claim in the email maps to a test.** `tests/E2ee.Tests/ProtocolTests.cs` holds
+   them. "Done" means the test exists and is green.
 3. **The protocol is the project, and the app is a demo.** A CLI client is enough. A GUI is
    polish we only add if time remains.
 4. **Mirror the spec.** Function and variable names follow the Signal pseudocode
@@ -40,18 +40,21 @@ comment about AI use.
 
 | Module | Role |
 |---|---|
-| `primitives.py` | pyca wrappers (X25519, Ed25519, HKDF, HMAC, AES-256-GCM). **Done, and RFC vectors pass.** |
-| `x3dh.py` | Prekey bundles, `initiate`, `respond`. |
-| `ratchet.py` | Double Ratchet state machine and header encoding. |
-| `server.py` | FastAPI and SQLite relay: bundle store and inbox queues. |
-| `client.py` | Session manager and CLI chat. |
+| `E2ee.Core/Primitives.cs` | Wrappers over NSec (X25519, Ed25519) and the .NET BCL (HKDF, HMAC, AES-256-GCM). **Done, and RFC vectors pass.** |
+| `E2ee.Core/X3dh.cs` | Prekey bundles, `Initiate`, `Respond`. |
+| `E2ee.Core/Ratchet.cs` | Double Ratchet state machine and header encoding. |
+| `E2ee.Server` | ASP.NET Core minimal API and SQLite relay: bundle store and inbox queues. |
+| `E2ee.Client` | Session manager and CLI chat. |
 
-**Language choice: Python with pyca/`cryptography`.** It has every primitive we need
-behind an audited OpenSSL backend, it's fast to write, and the code reads like the spec.
-Performance doesn't matter at chat speeds.
+**Language choice: C# on .NET 8.** X25519 and Ed25519 come from NSec.Cryptography, a thin
+binding to libsodium. HKDF-SHA256, HMAC-SHA256, and AES-256-GCM come from the .NET base class
+library (`System.Security.Cryptography`), which uses the platform's crypto (OpenSSL or Apple's
+CommonCrypto). We still hand-roll nothing below the protocol layer, and static types make
+key/byte confusion a compile error. The project started in Python with pyca/`cryptography`
+and was ported; the protocol constants and wire format did not change.
 
-**Known deviation:** Signal signs prekeys with XEdDSA under the X25519 identity key. pyca
-has no XEdDSA, so each identity has two keys: Ed25519 for signing and X25519 for DH. This
+**Known deviation:** Signal signs prekeys with XEdDSA under the X25519 identity key. neither NSec nor
+the BCL has XEdDSA, so each identity has two keys: Ed25519 for signing and X25519 for DH. This
 is a common simplification, and the report will discuss why it is fine here.
 
 ## Milestones
@@ -76,11 +79,11 @@ reading the specs. Design (§3) gets drafted as soon as milestone 2's interfaces
 Signal doesn't publish official X3DH or Double Ratchet test vectors, so the email's
 "test against known test vectors" becomes three layers:
 
-1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in `tests/test_primitives.py`
+1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in `tests/E2ee.Tests/PrimitivesTests.cs`
    and already pass.
 2. **Protocol known-answer and interop**: fix every private key, then compare our SK and
    message keys against an independent implementation, such as the `x3dh` and `doubleratchet`
-   PyPI packages configured with the same KDF parameters, or a teammate's separate script.
+   PyPI packages (or libsignal) configured with the same KDF parameters, or a teammate's separate script.
    That turns the protocol into deterministic vectors we can commit under `tests/vectors/`.
 3. **Property tests**: randomized delivery orders and drops (seeded), tampering, replay.
 
@@ -104,9 +107,9 @@ trusts a plain statement like that more than an overclaim.
 
 | Role | Owns |
 |---|---|
-| Protocol A | `x3dh.py` and its tests, then helps with the ratchet. |
-| Protocol B | `ratchet.py` and its tests. |
-| Systems | `server.py`, `client.py`, persistence, demo script. |
+| Protocol A | `X3dh.cs` and its tests, then helps with the ratchet. |
+| Protocol B | `Ratchet.cs` and its tests. |
+| Systems | `E2ee.Server`, `E2ee.Client`, persistence, demo script. |
 | Evaluation / report lead | Cross-check vectors, security demos, figures, report assembly. |
 | (5th) Stretch | Safety numbers and the group-messaging research spike. |
 
@@ -125,5 +128,5 @@ Everyone writes their own subsection of §3 and §4. One person edits for a sing
 
 - Use `main` plus short feature branches and PRs, with one reviewer per PR, ideally the
   other protocol person.
-- Run `pytest` before every merge. Un-skip a test in the same PR as the code it covers.
+- Run `dotnet test` before every merge. Add a test in the same PR as the code it covers.
 - Save AI transcripts as you go into `transcripts/`, then zip it at the end.
