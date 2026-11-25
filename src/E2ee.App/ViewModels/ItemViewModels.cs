@@ -118,6 +118,17 @@ public sealed partial class MessageViewModel(StoredMessage m) : ViewModelBase
     public string Sender { get; } = m.Peer;
     public bool ShowSender { get; } = m.GroupId is not null && !m.Outgoing && !m.IsEvent;
 
+    /// <summary>The sender's color slot in this chat (see <see cref="SenderColors"/>).</summary>
+    public int SenderSlot { get; private set; }
+
+    [ObservableProperty] private IBrush? _senderBrush;
+
+    public void SetSenderSlot(int slot)
+    {
+        SenderSlot = slot;
+        SenderBrush = SenderColors.Brush(slot);
+    }
+
     private readonly string _time = Display.Time(m.SentAt);
 
     [ObservableProperty]

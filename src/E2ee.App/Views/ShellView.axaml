@@ -10,7 +10,7 @@
       <Setter Property="Padding" Value="12,8" />
       <Setter Property="Margin" Value="0,3" />
       <Setter Property="HorizontalAlignment" Value="Left" />
-      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
+      <Setter Property="Background" Value="{DynamicResource IncomingBubbleBrush}" />
     </Style>
     <Style Selector="Border.bubble.outgoing">
       <Setter Property="HorizontalAlignment" Value="Right" />
@@ -180,8 +180,8 @@
                     <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}"
                             IsVisible="{Binding IsBubble}">
                       <StackPanel>
-                        <TextBlock Text="{Binding Sender}" FontSize="12" FontWeight="SemiBold" Opacity="0.8"
-                                   Margin="0,0,0,2" IsVisible="{Binding ShowSender}" />
+                        <TextBlock Name="SenderName" Text="{Binding Sender}" FontSize="12" FontWeight="Bold"
+                                   Foreground="{Binding SenderBrush}" Margin="0,0,0,2" IsVisible="{Binding ShowSender}" />
                         <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
                         <TextBlock Classes="meta" Text="{Binding MetaText}" />
                       </StackPanel>

@@ -67,6 +67,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     public async Task StartAsync(bool push = true)
     {
+        if (Avalonia.Application.Current is { } app) app.ActualThemeVariantChanged += OnThemeChanged;
         foreach (var c in await messenger.ConversationsAsync())
             Contacts.Add(c.Group is { } g ? new ContactViewModel(g, c.Last) : new ContactViewModel(c.Contact!, c.Last));
         await SyncNowAsync();
@@ -75,6 +76,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     public void Dispose()
     {
+        if (Avalonia.Application.Current is { } app) app.ActualThemeVariantChanged -= OnThemeChanged;
         _stop.Cancel();
         messenger.Dispose();
     }
@@ -122,7 +124,35 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             : await messenger.HistoryAsync(contact.Username, 200);
         if (Selected != contact) return; // the user clicked elsewhere meanwhile
         Messages.Clear();
-        foreach (var m in history) Messages.Add(new MessageViewModel(m));
+        _senderSlots.Clear();
+        // Everyone in the chat gets a color up front, in name order, so colors don't depend on who spoke first.
+        if (contact.IsGroup)
+            foreach (var person in contact.Members.Concat(history.Where(m => !m.Outgoing && !m.IsEvent).Select(m => m.Peer)).Distinct().Order())
+                SlotFor(person);
+        foreach (var m in history) AddMessage(m);
+    }
+
+    /// <summary>Color slots of the people in the open chat. Nobody's color changes while it stays open.</summary>
+    private readonly Dictionary<string, int> _senderSlots = new();
+
+    private int SlotFor(string person)
+    {
+        if (!_senderSlots.TryGetValue(person, out var slot))
+            _senderSlots[person] = slot = _senderSlots.Count % SenderColors.Count;
+        return slot;
+    }
+
+    private void AddMessage(StoredMessage m)
+    {
+        var vm = new MessageViewModel(m);
+        if (vm.ShowSender) vm.SetSenderSlot(SlotFor(m.Peer));
+        Messages.Add(vm);
+    }
+
+    /// <summary>Light and dark mode use different palettes.</summary>
+    private void OnThemeChanged(object? sender, EventArgs e)
+    {
+        foreach (var m in Messages.Where(m => m.ShowSender)) m.SetSenderSlot(m.SenderSlot);
     }
 
     private bool CanSend() => CanCompose && !string.IsNullOrWhiteSpace(Draft);
@@ -136,7 +166,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         try
         {
             var msg = peer.IsGroup ? await messenger.SendGroupAsync(peer.GroupId!, text) : await messenger.SendAsync(peer.Username, text);
-            if (Selected == peer) Messages.Add(new MessageViewModel(msg));
+            if (Selected == peer) AddMessage(msg);
             peer.Update(msg);
             MoveToTop(peer);
             RelayOnline = msg.Status != MessageStatus.Pending;
@@ -355,7 +385,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         if ((await messenger.GroupHistoryAsync(group.GroupId!, 1)).LastOrDefault() is not { } last) return;
         group.Update(last);
         MoveToTop(group);
-        if (Selected == group && Messages.All(m => m.Id != last.Id)) Messages.Add(new MessageViewModel(last));
+        if (Selected == group && Messages.All(m => m.Id != last.Id)) AddMessage(last);
     }
 
     private void GroupStateChanged(ContactViewModel group)
@@ -403,7 +433,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
                 var contact = ConversationFor(msg);
                 contact.Update(msg);
                 MoveToTop(contact);
-                if (Selected == contact) Messages.Add(new MessageViewModel(msg));
+                if (Selected == contact) AddMessage(msg);
                 else contact.Unread++;
             }
             foreach (var user in result.IdentityChanges) MarkIdentityChanged(user);

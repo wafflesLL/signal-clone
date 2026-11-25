@@ -368,6 +368,13 @@ public sealed class AppTests : IDisposable
         Assert.Equal(["bob", "carol"], shell.Messages.Where(m => m.ShowSender).Select(m => m.Sender));
         Assert.Equal("carol: Design and testing for me.", group.Preview);
 
+        // Each person's name has their own color, the same on every message.
+        await bob.SendGroupAsync(group.GroupId!, "Also the intro.");
+        await shell.SyncNowAsync();
+        var names = shell.Messages.Where(m => m.ShowSender).ToList();
+        Assert.Equal(2, names.Select(m => m.SenderBrush).Distinct().Count());
+        Assert.Equal(names[0].SenderBrush, names[2].SenderBrush);
+
         // Adding someone shows up as a line in the chat and in the header.
         shell.OpenAddMembersCommand.Execute(null);
         shell.GroupForm!.Members = "dave";
@@ -376,6 +383,15 @@ public sealed class AppTests : IDisposable
         Assert.Equal("You added dave.", shell.Messages.Last().Text);
         Assert.True(shell.Messages.Last().IsEvent);
         Screenshot(window, "10-group-chat");
+
+        // Dark mode switches to the light-on-dark palette; people keep their slots.
+        var bobSlot = names[0].SenderSlot;
+        Application.Current!.RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Dark;
+        Dispatcher.UIThread.RunJobs();
+        Assert.Equal(SenderColors.Dark[bobSlot], ((Avalonia.Media.ISolidColorBrush)names[0].SenderBrush!).Color.ToString().Replace("#ff", "#").ToUpperInvariant());
+        Screenshot(window, "11-group-chat-dark");
+        Application.Current.RequestedThemeVariant = Avalonia.Styling.ThemeVariant.Light;
+        Dispatcher.UIThread.RunJobs();
 
         // A group someone else creates appears with an unread badge.
         var other = await bob.CreateGroupAsync("Lunch", ["alice"]);
@@ -401,6 +417,38 @@ public sealed class AppTests : IDisposable
         Assert.Contains(shell2.Contacts, c => c.Title == "COSC 483 project" && c.Active);
         Assert.Contains(shell2.Contacts, c => c.Title == "Lunch" && !c.Active);
         reopened.Dispose();
+    }
+
+    [AvaloniaFact]
+    public void SenderColorsStandOutInBothThemes()
+    {
+        static double Luminance(Avalonia.Media.Color c)
+        {
+            static double Channel(byte v) { var x = v / 255.0; return x <= 0.03928 ? x / 12.92 : Math.Pow((x + 0.055) / 1.055, 2.4); }
+            return 0.2126 * Channel(c.R) + 0.7152 * Channel(c.G) + 0.0722 * Channel(c.B);
+        }
+        static double Contrast(Avalonia.Media.Color a, Avalonia.Media.Color b)
+        {
+            var (x, y) = (Luminance(a), Luminance(b));
+            return (Math.Max(x, y) + 0.05) / (Math.Min(x, y) + 0.05);
+        }
+
+        foreach (var (theme, palette, window) in new[]
+                 {
+                     (Avalonia.Styling.ThemeVariant.Light, SenderColors.Light, Avalonia.Media.Colors.White),
+                     (Avalonia.Styling.ThemeVariant.Dark, SenderColors.Dark, Avalonia.Media.Color.Parse("#1C1C1E")),
+                 })
+        {
+            Assert.True(Application.Current!.TryGetResource("IncomingBubbleBrush", theme, out var res));
+            var bubble = ((Avalonia.Media.ISolidColorBrush)res!).Color;
+            Assert.Equal(SenderColors.Count, palette.Distinct().Count());
+            foreach (var hex in palette)
+            {
+                var c = Avalonia.Media.Color.Parse(hex);
+                Assert.True(Contrast(c, bubble) >= 4.5, $"{hex} on the {theme} bubble: {Contrast(c, bubble):F2}:1");
+                Assert.True(Contrast(c, window) >= 4.5, $"{hex} on the {theme} window: {Contrast(c, window):F2}:1");
+            }
+        }
     }
 
     [AvaloniaFact]

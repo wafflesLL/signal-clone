@@ -12,6 +12,20 @@
     <DataTemplate DataType="vm:ErrorViewModel"><v:ErrorView /></DataTemplate>
   </Application.DataTemplates>
 
+  <Application.Resources>
+    <ResourceDictionary>
+      <!-- Incoming bubbles. Sender-name colors (SenderColors.cs) are checked against these. -->
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#E9E9EB" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#3A3A3C" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
   <Application.Styles>
     <FluentTheme />
     <Style Selector="TextBlock.title">
