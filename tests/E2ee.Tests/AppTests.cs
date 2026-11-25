@@ -324,6 +324,86 @@ public sealed class AppTests : IDisposable
     }
 
     [AvaloniaFact]
+    public async Task GroupChat()
+    {
+        var bob = await _relay.Register("bob");
+        var carol = await _relay.Register("carol");
+        await _relay.Register("dave");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+
+        // Create the group the way a user would.
+        Find<Button>(window, "NewGroupButton").Command!.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+        var form = Assert.IsType<GroupFormViewModel>(shell.GroupForm);
+        Assert.False(form.SubmitCommand.CanExecute(null));
+        Type(window, Find<TextBox>(window, "GroupNameBox"), "COSC 483 project");
+        Type(window, Find<TextBox>(window, "GroupMembersBox"), "bob, carol, nobody");
+        await form.SubmitCommand.ExecuteAsync(null);
+        Assert.Contains("No user named 'nobody'", form.Error); // the form stays open with the error
+        Screenshot(window, "9-new-group");
+
+        form.Members = "bob, carol";
+        await form.SubmitCommand.ExecuteAsync(null);
+        Assert.Null(shell.GroupForm);
+        var group = shell.Selected!;
+        Assert.True(group.IsGroup);
+        Assert.Equal("COSC 483 project", group.Title);
+        Assert.Equal("You, bob, carol", group.MembersText);
+        Assert.True(shell.CanManageGroup);
+        Assert.False(shell.ShowSafetyButton);
+
+        Type(window, Find<TextBox>(window, "DraftBox"), "Report draft is in the repo.", enter: true);
+        await Settle();
+        Assert.Equal(MessageStatus.Sent, shell.Messages.Last().Status);
+
+        await bob.SyncAsync();
+        await carol.SyncAsync();
+        await bob.SendGroupAsync(group.GroupId!, "I'll take the Background section.");
+        await carol.SendGroupAsync(group.GroupId!, "Design and testing for me.");
+        await shell.SyncNowAsync();
+        Assert.Equal(["bob", "carol"], shell.Messages.Where(m => m.ShowSender).Select(m => m.Sender));
+        Assert.Equal("carol: Design and testing for me.", group.Preview);
+
+        // Adding someone shows up as a line in the chat and in the header.
+        shell.OpenAddMembersCommand.Execute(null);
+        shell.GroupForm!.Members = "dave";
+        await shell.GroupForm.SubmitCommand.ExecuteAsync(null);
+        Assert.Equal("You, bob, carol, dave", group.MembersText);
+        Assert.Equal("You added dave.", shell.Messages.Last().Text);
+        Assert.True(shell.Messages.Last().IsEvent);
+        Screenshot(window, "10-group-chat");
+
+        // A group someone else creates appears with an unread badge.
+        var other = await bob.CreateGroupAsync("Lunch", ["alice"]);
+        await shell.SyncNowAsync();
+        Assert.Equal("Lunch", shell.Contacts[0].Title);
+        Assert.Equal(1, shell.Contacts[0].Unread);
+
+        // Leaving keeps the history but closes the composer.
+        shell.Selected = shell.Contacts[0];
+        await Settle();
+        await shell.LeaveGroupCommand.ExecuteAsync(null);
+        Assert.True(shell.Selected.HasLeft);
+        Assert.False(shell.CanCompose);
+        Assert.False(shell.CanManageGroup);
+        Assert.Equal("You left the group.", shell.Messages.Last().Text);
+        Assert.Equal(["* alice left."], (await bob.SyncAsync()).Received.Where(m => m.GroupId == other.Id).Select(m => $"* {m.Text}"));
+
+        // Groups come back after a restart.
+        vm.Dispose();
+        var reopened = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var shell2 = Assert.IsType<ShellViewModel>(reopened.Current);
+        await reopened.ShellReady;
+        Assert.Contains(shell2.Contacts, c => c.Title == "COSC 483 project" && c.Active);
+        Assert.Contains(shell2.Contacts, c => c.Title == "Lunch" && !c.Active);
+        reopened.Dispose();
+    }
+
+    [AvaloniaFact]
     public async Task PushDeliversWithoutPolling()
     {
         var bob = await _relay.Register("bob");

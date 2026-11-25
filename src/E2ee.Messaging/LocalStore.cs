@@ -11,7 +11,15 @@ namespace E2ee.Messaging;
 
 public enum MessageStatus { Pending, Sent, Received, Failed }
 
-public sealed record StoredMessage(long Id, string Peer, bool Outgoing, string Text, DateTimeOffset SentAt, MessageStatus Status);
+/// <param name="Peer">The other person in a direct chat. In a group chat, who sent it (you, for outgoing).</param>
+/// <param name="GroupId">Set for messages in a group chat.</param>
+/// <param name="IsEvent">A line about the group itself ("bob left") rather than something someone wrote.</param>
+public sealed record StoredMessage(long Id, string Peer, bool Outgoing, string Text, DateTimeOffset SentAt, MessageStatus Status,
+    string? GroupId = null, bool IsEvent = false);
+
+/// <summary>A group chat as this device knows it. Members are everyone else in it, not you.</summary>
+/// <param name="Active">False after you left; the history stays.</param>
+public sealed record Group(string Id, string Name, IReadOnlyList<string> Members, DateTimeOffset CreatedAt, bool Active = true);
 
 /// <param name="Verified">The user compared safety numbers with this contact and confirmed them.</param>
 /// <param name="IdentityChanged">Someone presented a different identity key for this contact. Their
@@ -59,6 +67,11 @@ internal sealed class LocalStore : IDisposable
             CREATE INDEX IF NOT EXISTS messages_peer ON messages (peer, id);
             CREATE TABLE IF NOT EXISTS outbox (message_id INTEGER PRIMARY KEY, peer TEXT NOT NULL, envelope BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS processed (server_id INTEGER PRIMARY KEY, outcome TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS groups (
+                id TEXT PRIMARY KEY, name BLOB NOT NULL, created_at INTEGER NOT NULL, active INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (group_id, username));
+            CREATE TABLE IF NOT EXISTS group_outbox (
+                message_id INTEGER NOT NULL, peer TEXT NOT NULL, envelope BLOB NOT NULL, PRIMARY KEY (message_id, peer));
             """);
         Migrate();
     }
@@ -72,6 +85,14 @@ internal sealed class LocalStore : IDisposable
             while (r.Read()) columns.Add(r.GetString(0));
         if (!columns.Contains("verified")) Exec("ALTER TABLE contacts ADD COLUMN verified INTEGER NOT NULL DEFAULT 0");
         if (!columns.Contains("identity_changed")) Exec("ALTER TABLE contacts ADD COLUMN identity_changed INTEGER NOT NULL DEFAULT 0");
+
+        columns.Clear();
+        using (var cmd = Cmd("SELECT name FROM pragma_table_info('messages')"))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(0));
+        if (!columns.Contains("group_id")) Exec("ALTER TABLE messages ADD COLUMN group_id TEXT");
+        if (!columns.Contains("kind")) Exec("ALTER TABLE messages ADD COLUMN kind TEXT NOT NULL DEFAULT 'text'");
+        Exec("CREATE INDEX IF NOT EXISTS messages_group ON messages (group_id, id)");
     }
 
     public void Dispose()
@@ -237,10 +258,14 @@ internal sealed class LocalStore : IDisposable
     public void DeleteSessions(string peer) => Exec("DELETE FROM sessions WHERE peer = $p", ("$p", peer));
 
     // ------------------------------------------------------------ messages
-    public long InsertMessage(string peer, bool outgoing, string text, DateTimeOffset sentAt, MessageStatus status)
+    public long InsertMessage(string peer, bool outgoing, string text, DateTimeOffset sentAt, MessageStatus status,
+        string? groupId = null, bool isEvent = false)
     {
-        using var cmd = Cmd("INSERT INTO messages (peer, outgoing, body, sent_at, status) VALUES ($p, $o, x'', $t, $s) RETURNING id",
-            ("$p", peer), ("$o", outgoing ? 1 : 0), ("$t", Ms(sentAt)), ("$s", status.ToString()));
+        using var cmd = Cmd("""
+            INSERT INTO messages (peer, outgoing, body, sent_at, status, group_id, kind)
+            VALUES ($p, $o, x'', $t, $s, $g, $k) RETURNING id
+            """, ("$p", peer), ("$o", outgoing ? 1 : 0), ("$t", Ms(sentAt)), ("$s", status.ToString()), ("$g", groupId),
+            ("$k", isEvent ? "event" : "text"));
         var id = (long)cmd.ExecuteScalar()!;
         Exec("UPDATE messages SET body = $b WHERE id = $i", ("$b", _cipher.Seal(Encoding.UTF8.GetBytes(text), $"message|{id}")), ("$i", id));
         return id;
@@ -253,24 +278,30 @@ internal sealed class LocalStore : IDisposable
     {
         var id = r.GetInt64(0);
         var text = Encoding.UTF8.GetString(_cipher.Open((byte[])r[3], $"message|{id}"));
-        return new StoredMessage(id, r.GetString(1), r.GetInt64(2) == 1, text, FromMs(r.GetInt64(4)), Enum.Parse<MessageStatus>(r.GetString(5)));
+        return new StoredMessage(id, r.GetString(1), r.GetInt64(2) == 1, text, FromMs(r.GetInt64(4)), Enum.Parse<MessageStatus>(r.GetString(5)),
+            r.IsDBNull(6) ? null : r.GetString(6), r.GetString(7) == "event");
     }
+
+    private const string MessageColumns = "id, peer, outgoing, body, sent_at, status, group_id, kind";
 
     public StoredMessage GetMessage(long id)
     {
-        using var cmd = Cmd("SELECT id, peer, outgoing, body, sent_at, status FROM messages WHERE id = $i", ("$i", id));
+        using var cmd = Cmd($"SELECT {MessageColumns} FROM messages WHERE id = $i", ("$i", id));
         using var r = cmd.ExecuteReader();
         r.Read();
         return ReadMessage(r);
     }
 
-    /// <summary>The newest <paramref name="limit"/> messages with the peer, oldest first.</summary>
-    public List<StoredMessage> History(string peer, int limit)
+    /// <summary>The newest <paramref name="limit"/> messages in the direct chat with the peer, oldest first.</summary>
+    public List<StoredMessage> History(string peer, int limit) => ReadMessages("peer = $p AND group_id IS NULL", peer, limit);
+
+    /// <summary>The newest <paramref name="limit"/> messages in the group, oldest first.</summary>
+    public List<StoredMessage> GroupHistory(string groupId, int limit) => ReadMessages("group_id = $p", groupId, limit);
+
+    private List<StoredMessage> ReadMessages(string where, string key, int limit)
     {
-        using var cmd = Cmd("""
-            SELECT * FROM (SELECT id, peer, outgoing, body, sent_at, status FROM messages WHERE peer = $p ORDER BY id DESC LIMIT $n)
-            ORDER BY id
-            """, ("$p", peer), ("$n", limit));
+        using var cmd = Cmd($"SELECT * FROM (SELECT {MessageColumns} FROM messages WHERE {where} ORDER BY id DESC LIMIT $n) ORDER BY id",
+            ("$p", key), ("$n", limit));
         using var r = cmd.ExecuteReader();
         var list = new List<StoredMessage>();
         while (r.Read()) list.Add(ReadMessage(r));
@@ -296,6 +327,73 @@ internal sealed class LocalStore : IDisposable
     }
 
     public void DeleteOutbox(long messageId) => Exec("DELETE FROM outbox WHERE message_id = $i", ("$i", messageId));
+
+    /// <summary>Copies of one group message still to deliver, one per member.</summary>
+    public void PutGroupOutbox(long messageId, string peer, EnvelopeDto env) =>
+        Exec("INSERT INTO group_outbox VALUES ($i, $p, $e)", ("$i", messageId), ("$p", peer),
+            ("$e", _cipher.Seal(JsonSerializer.SerializeToUtf8Bytes(env, WireJson.Options), $"group_outbox|{messageId}|{peer}")));
+
+    public List<(string Peer, EnvelopeDto Envelope)> GroupOutbox(long messageId)
+    {
+        using var cmd = Cmd("SELECT peer, envelope FROM group_outbox WHERE message_id = $i ORDER BY peer", ("$i", messageId));
+        using var r = cmd.ExecuteReader();
+        var list = new List<(string, EnvelopeDto)>();
+        while (r.Read())
+        {
+            var peer = r.GetString(0);
+            list.Add((peer, JsonSerializer.Deserialize<EnvelopeDto>(_cipher.Open((byte[])r[1], $"group_outbox|{messageId}|{peer}"), WireJson.Options)!));
+        }
+        return list;
+    }
+
+    public List<long> GroupOutboxMessages()
+    {
+        using var cmd = Cmd("SELECT DISTINCT message_id FROM group_outbox ORDER BY message_id");
+        using var r = cmd.ExecuteReader();
+        var list = new List<long>();
+        while (r.Read()) list.Add(r.GetInt64(0));
+        return list;
+    }
+
+    public void DeleteGroupOutbox(long messageId, string peer) =>
+        Exec("DELETE FROM group_outbox WHERE message_id = $i AND peer = $p", ("$i", messageId), ("$p", peer));
+
+    // ------------------------------------------------------------ groups
+    public Group? GetGroup(string id)
+    {
+        var all = ReadGroups("WHERE id = $i", id);
+        return all.Count == 1 ? all[0] : null;
+    }
+
+    public List<Group> Groups() => ReadGroups("", null);
+
+    private List<Group> ReadGroups(string where, string? id)
+    {
+        var rows = new List<(string Id, byte[] Name, long Created, bool Active)>();
+        using (var cmd = Cmd($"SELECT id, name, created_at, active FROM groups {where} ORDER BY created_at", ("$i", id)))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) rows.Add((r.GetString(0), (byte[])r[1], r.GetInt64(2), r.GetInt64(3) == 1));
+
+        var list = new List<Group>();
+        foreach (var g in rows)
+        {
+            var members = new List<string>();
+            using (var cmd = Cmd("SELECT username FROM group_members WHERE group_id = $i ORDER BY username", ("$i", g.Id)))
+            using (var r = cmd.ExecuteReader())
+                while (r.Read()) members.Add(r.GetString(0));
+            list.Add(new Group(g.Id, Encoding.UTF8.GetString(_cipher.Open(g.Name, $"group|{g.Id}")), members, FromMs(g.Created), g.Active));
+        }
+        return list;
+    }
+
+    /// <summary>Writes the group and replaces its member list.</summary>
+    public void PutGroup(Group g)
+    {
+        Exec("INSERT OR REPLACE INTO groups VALUES ($i, $n, $t, $a)", ("$i", g.Id),
+            ("$n", _cipher.Seal(Encoding.UTF8.GetBytes(g.Name), $"group|{g.Id}")), ("$t", Ms(g.CreatedAt)), ("$a", g.Active ? 1 : 0));
+        Exec("DELETE FROM group_members WHERE group_id = $i", ("$i", g.Id));
+        foreach (var u in g.Members) Exec("INSERT INTO group_members VALUES ($i, $u)", ("$i", g.Id), ("$u", u));
+    }
 
     // ------------------------------------------------------------ processed inbox ids
     public bool IsProcessed(long serverId)

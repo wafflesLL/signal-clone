@@ -37,7 +37,11 @@ public sealed record PrekeyPolicy
     public TimeSpan CheckInterval { get; init; } = TimeSpan.FromMinutes(10);
 }
 
-public sealed record Conversation(Contact Contact, StoredMessage? Last);
+/// <summary>A chat in the conversation list: either a direct chat (Contact) or a group (Group).</summary>
+public sealed record Conversation(Contact? Contact, Group? Group, StoredMessage? Last)
+{
+    public DateTimeOffset LastActivity => Last?.SentAt ?? Contact?.AddedAt ?? Group!.CreatedAt;
+}
 
 /// <summary>An identity key as the relay reports it, with the safety number it gives.</summary>
 public sealed record IdentityCheck(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, string SafetyNumber, bool MatchesTrustedKey);
@@ -57,13 +61,22 @@ public sealed class IdentityChangedException(string user) : MessengerException(
     public string Username { get; } = user;
 }
 
-/// <summary>Plaintext inside every ratchet message. Leaves room for other types later.</summary>
-internal sealed record MessageContent(string Type, string Body, long SentAt);
+/// <summary>
+/// Plaintext inside every ratchet message. Type is "text", "group_update" (the group's name
+/// and full member list, sent when it is created or someone is added) or "group_leave".
+/// Group is set for anything that belongs to a group chat.
+/// </summary>
+internal sealed record MessageContent(string Type, string Body, long SentAt, GroupContext? Group = null);
+
+/// <param name="Members">Everyone in the group, sender included. Only in group_update.</param>
+internal sealed record GroupContext(string Id, string? Name = null, List<string>? Members = null);
 
 public sealed class Messenger : IDisposable
 {
     private const string Spk = "spk", Opk = "opk";
     private const int MaxSessionsPerPeer = 5;
+    public const int MaxGroupSize = 50; // including you
+    public const int MaxGroupNameLength = 64;
 
     private readonly LocalStore _store;
     private readonly RelayClient _relay;
@@ -288,11 +301,12 @@ public sealed class Messenger : IDisposable
 
     public Contact? GetContact(string username) => LockedSync(() => _store.GetContact(username));
 
-    /// <summary>Every contact with their latest message, most recent activity first.</summary>
+    /// <summary>Every direct chat and group with its latest message, most recent activity first.</summary>
     public Task<IReadOnlyList<Conversation>> ConversationsAsync() => Locked<IReadOnlyList<Conversation>>(() =>
         _store.Contacts()
-            .Select(c => new Conversation(c, _store.History(c.Username, 1).FirstOrDefault()))
-            .OrderByDescending(c => c.Last?.SentAt ?? c.Contact.AddedAt)
+            .Select(c => new Conversation(c, null, _store.History(c.Username, 1).FirstOrDefault()))
+            .Concat(_store.Groups().Select(g => new Conversation(null, g, _store.GroupHistory(g.Id, 1).FirstOrDefault())))
+            .OrderByDescending(c => c.LastActivity)
             .ToList());
 
     /// <summary>Looks the user up on the relay and remembers their identity key (trust on first use).</summary>
@@ -416,33 +430,14 @@ public sealed class Messenger : IDisposable
         if (_store.GetContact(peer) is { IdentityChanged: true }) throw new IdentityChangedException(peer);
 
         // A new session needs a bundle from the relay; fetch it before opening a transaction.
-        BundleResponse? bundle = null;
-        if (_store.Sessions(peer).Count == 0)
-        {
-            try { bundle = await _relay.TakeBundleAsync(peer, ct); }
-            catch (RelayException e) when (e.Status == System.Net.HttpStatusCode.NotFound) { throw new UserNotFoundException(peer); }
-        }
+        var bundles = await FetchMissingBundlesAsync([peer], ct);
 
         long messageId;
         EnvelopeDto env;
         using (var tx = _store.Begin())
         {
-            (string Sid, SessionRecord Rec) session;
-            try { session = bundle is null ? _store.Sessions(peer)[0] : StartSession(peer, bundle); }
-            catch (IdentityChangedException)
-            {
-                tx.Dispose();
-                FlagIdentityChanged(peer);
-                throw;
-            }
-            var (sid, rec) = session;
-            var state = RatchetState.FromDto(rec.State);
             var sentAt = Now;
-            var plaintext = JsonSerializer.SerializeToUtf8Bytes(new MessageContent("text", text, sentAt.ToUnixTimeMilliseconds()), WireJson.Options);
-            var (header, ct2) = Ratchet.Encrypt(state, plaintext, rec.Ad);
-            env = new EnvelopeDto(rec.PendingInitial, header.Encode(), ct2);
-
-            _store.PutSession(peer, sid, rec with { State = state.ToDto() }, Now);
+            env = EncryptOrFlag(tx, peer, bundles.GetValueOrDefault(peer), Serialize(new MessageContent("text", text, sentAt.ToUnixTimeMilliseconds())));
             messageId = _store.InsertMessage(peer, true, text, sentAt, MessageStatus.Pending);
             _store.PutOutbox(messageId, peer, env);
             tx.Commit();
@@ -452,6 +447,43 @@ public sealed class Messenger : IDisposable
         catch (RelayException e) when (e.Status is null) { /* stays pending; retried on sync */ }
         return _store.GetMessage(messageId);
     });
+
+    private static byte[] Serialize(MessageContent content) => JsonSerializer.SerializeToUtf8Bytes(content, WireJson.Options);
+
+    /// <summary>Takes a prekey bundle for each peer we have no session with yet.</summary>
+    private async Task<Dictionary<string, BundleResponse>> FetchMissingBundlesAsync(IEnumerable<string> peers, CancellationToken ct)
+    {
+        var bundles = new Dictionary<string, BundleResponse>();
+        foreach (var peer in peers)
+        {
+            if (_store.Sessions(peer).Count > 0) continue;
+            try { bundles[peer] = await _relay.TakeBundleAsync(peer, ct); }
+            catch (RelayException e) when (e.Status == System.Net.HttpStatusCode.NotFound) { throw new UserNotFoundException(peer); }
+        }
+        return bundles;
+    }
+
+    /// <summary>
+    /// Encrypts on the session we send on (starting one from the bundle if needed) and saves
+    /// the advanced state. Runs inside <paramref name="tx"/>; if the peer's key changed, rolls
+    /// it back, flags the contact, and throws.
+    /// </summary>
+    private EnvelopeDto EncryptOrFlag(LocalStore.Tx tx, string peer, BundleResponse? bundle, byte[] plaintext)
+    {
+        (string Sid, SessionRecord Rec) session;
+        try { session = bundle is null ? _store.Sessions(peer)[0] : StartSession(peer, bundle); }
+        catch (IdentityChangedException)
+        {
+            tx.Dispose();
+            FlagIdentityChanged(peer);
+            throw;
+        }
+        var (sid, rec) = session;
+        var state = RatchetState.FromDto(rec.State);
+        var (header, ciphertext) = Ratchet.Encrypt(state, plaintext, rec.Ad);
+        _store.PutSession(peer, sid, rec with { State = state.ToDto() }, Now);
+        return new EnvelopeDto(rec.PendingInitial, header.Encode(), ciphertext);
+    }
 
     /// <summary>X3DH as the initiator. Runs inside the caller's transaction.</summary>
     private (string Sid, SessionRecord Rec) StartSession(string peer, BundleResponse b)
@@ -500,6 +532,210 @@ public sealed class Messenger : IDisposable
         tx.Commit();
     }
 
+    // ================================================================ groups
+    //
+    // A group message is sent as a separate copy to each member over the ordinary pairwise
+    // sessions ("client-side fan-out", as Signal did before Sender Keys). The relay sees only
+    // one-to-one messages and never learns that a group exists. Every member keeps their own
+    // copy of the member list. Updates can only add people; the only way out is to leave.
+    // Messages that claim to be for a group are accepted only from its current members.
+
+    public IReadOnlyList<Group> Groups() => LockedSync<IReadOnlyList<Group>>(_store.Groups);
+
+    public Group? GetGroup(string groupId) => LockedSync(() => _store.GetGroup(groupId));
+
+    public Task<IReadOnlyList<StoredMessage>> GroupHistoryAsync(string groupId, int limit = 50) =>
+        Locked<IReadOnlyList<StoredMessage>>(() => _store.GroupHistory(groupId, limit));
+
+    public IReadOnlyList<StoredMessage> GroupHistory(string groupId, int limit = 50) =>
+        LockedSync<IReadOnlyList<StoredMessage>>(() => _store.GroupHistory(groupId, limit));
+
+    /// <summary>Creates a group with you and <paramref name="members"/> and tells each of them.</summary>
+    public Task<Group> CreateGroupAsync(string name, IEnumerable<string> members, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        name = name.Trim();
+        if (name.Length is 0 or > MaxGroupNameLength) throw new MessengerException($"Group names are 1-{MaxGroupNameLength} characters.");
+        var others = NormalizeMembers(members);
+        if (others.Count == 0) throw new MessengerException("Add at least one other person to the group.");
+        CheckGroupSize(others.Count);
+
+        var group = new Group(Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
+            name, others, Now);
+        await FanOutAsync(others, GroupUpdate(group), sentAt =>
+        {
+            _store.PutGroup(group);
+            return _store.InsertMessage(Username!, true, $"You created the group with {string.Join(", ", others)}.", sentAt,
+                MessageStatus.Pending, group.Id, isEvent: true);
+        }, ct);
+        return group;
+    });
+
+    /// <summary>Adds people to a group. Everyone, old members and new, gets the new member list.</summary>
+    public Task<Group> AddGroupMembersAsync(string groupId, IEnumerable<string> members, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        var group = ActiveGroup(groupId);
+        var added = NormalizeMembers(members).Except(group.Members).ToList();
+        if (added.Count == 0) throw new MessengerException("They're already in the group.");
+        CheckGroupSize(group.Members.Count + added.Count);
+
+        var updated = group with { Members = group.Members.Concat(added).Order().ToList() };
+        await FanOutAsync(updated.Members, GroupUpdate(updated), sentAt =>
+        {
+            _store.PutGroup(updated);
+            return _store.InsertMessage(Username!, true, $"You added {string.Join(", ", added)}.", sentAt, MessageStatus.Pending, groupId, isEvent: true);
+        }, ct);
+        return updated;
+    });
+
+    /// <summary>Tells the members you left and stops accepting the group's messages. History stays.</summary>
+    public Task<Group> LeaveGroupAsync(string groupId, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        var group = ActiveGroup(groupId);
+        var left = group with { Active = false };
+        // Nothing secret goes out, so skip anyone whose key is in doubt rather than block leaving.
+        var recipients = group.Members.Where(m => _store.GetContact(m) is not { IdentityChanged: true }).ToList();
+        await FanOutAsync(recipients, new MessageContent("group_leave", "", 0, new GroupContext(groupId)), sentAt =>
+        {
+            _store.PutGroup(left);
+            return _store.InsertMessage(Username!, true, "You left the group.", sentAt, MessageStatus.Pending, groupId, isEvent: true);
+        }, ct, checkIdentities: false);
+        return left;
+    });
+
+    /// <summary>Sends a message to everyone in the group. Blocked while any member's safety number change is unresolved.</summary>
+    public Task<StoredMessage> SendGroupAsync(string groupId, string text, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        var group = ActiveGroup(groupId);
+        var id = await FanOutAsync(group.Members, new MessageContent("text", text, 0, new GroupContext(groupId)),
+            sentAt => _store.InsertMessage(Username!, true, text, sentAt, MessageStatus.Pending, groupId), ct);
+        return _store.GetMessage(id);
+    });
+
+    /// <summary>Tests only: sends arbitrary content to one peer, as a modified client could.</summary>
+    internal Task SendRawForTestAsync(string peer, MessageContent content) => Locked(() =>
+        FanOutAsync([peer], content, t => _store.InsertMessage(peer, true, "(raw)", t, MessageStatus.Pending), default));
+
+    private MessageContent GroupUpdate(Group g) =>
+        new("group_update", "", 0, new GroupContext(g.Id, g.Name, [.. g.Members, Username!]));
+
+    private Group ActiveGroup(string groupId)
+    {
+        var group = _store.GetGroup(groupId) ?? throw new MessengerException("No such group.");
+        if (!group.Active) throw new MessengerException("You left this group.");
+        return group;
+    }
+
+    private List<string> NormalizeMembers(IEnumerable<string> members)
+    {
+        var list = members.Select(m => m.Trim().ToLowerInvariant()).Where(m => m.Length > 0 && m != Username).Distinct().Order().ToList();
+        if (list.FirstOrDefault(m => !Usernames.IsValid(m)) is { } bad) throw new UserNotFoundException(bad);
+        return list;
+    }
+
+    private static void CheckGroupSize(int others)
+    {
+        if (others + 1 > MaxGroupSize) throw new MessengerException($"Groups can have at most {MaxGroupSize} people.");
+    }
+
+    /// <summary>
+    /// Encrypts <paramref name="content"/> once per recipient, records the message (written by
+    /// <paramref name="record"/>, in the same transaction) and the copies to deliver, then tries
+    /// to deliver them. Copies the relay can't take now are retried on sync. Returns the message id.
+    /// </summary>
+    private async Task<long> FanOutAsync(IReadOnlyList<string> recipients, MessageContent content, Func<DateTimeOffset, long> record,
+        CancellationToken ct, bool checkIdentities = true)
+    {
+        if (checkIdentities && recipients.FirstOrDefault(r => _store.GetContact(r) is { IdentityChanged: true }) is { } flagged)
+            throw new IdentityChangedException(flagged);
+
+        var bundles = await FetchMissingBundlesAsync(recipients, ct);
+        long messageId;
+        using (var tx = _store.Begin())
+        {
+            var sentAt = Now;
+            var plaintext = Serialize(content with { SentAt = sentAt.ToUnixTimeMilliseconds() });
+            var copies = recipients.Select(r => (Peer: r, Env: EncryptOrFlag(tx, r, bundles.GetValueOrDefault(r), plaintext))).ToList();
+            messageId = record(sentAt);
+            foreach (var (peer, env) in copies) _store.PutGroupOutbox(messageId, peer, env);
+            if (copies.Count == 0) _store.SetMessageStatus(messageId, MessageStatus.Sent);
+            tx.Commit();
+        }
+        await DeliverCopiesAsync(messageId, [], ct);
+        return messageId;
+    }
+
+    /// <summary>Delivers a group message's remaining copies. Returns false if the relay is unreachable.</summary>
+    private async Task<bool> DeliverCopiesAsync(long messageId, List<string> problems, CancellationToken ct)
+    {
+        foreach (var (peer, env) in _store.GroupOutbox(messageId))
+        {
+            var failed = false;
+            try { await _relay.SendAsync(peer, env, ct); }
+            catch (RelayException e) when (e.Status is null) { return false; }
+            catch (RelayException e)
+            {
+                failed = true;
+                problems.Add($"Could not deliver a group message to {peer}: {e.Message}");
+            }
+            using var tx = _store.Begin();
+            _store.DeleteGroupOutbox(messageId, peer);
+            if (failed) _store.SetMessageStatus(messageId, MessageStatus.Failed);
+            else if (_store.GroupOutbox(messageId).Count == 0 && _store.GetMessage(messageId).Status == MessageStatus.Pending)
+                _store.SetMessageStatus(messageId, MessageStatus.Sent);
+            tx.Commit();
+        }
+        return true;
+    }
+
+    /// <summary>Applies a group message or update from <paramref name="sender"/>. Runs inside the caller's transaction.</summary>
+    private (long? MessageId, string? Problem) ReceiveGroup(string sender, MessageContent content, DateTimeOffset sentAt)
+    {
+        var ctx = content.Group!;
+        if (ctx.Id.Length != 32 || !ctx.Id.All(Uri.IsHexDigit)) return (null, $"Ignored a malformed group message from {sender}.");
+        var group = _store.GetGroup(ctx.Id);
+        var isMember = group is { Active: true } && group.Members.Contains(sender);
+
+        switch (content.Type)
+        {
+            case "text":
+                if (group is { Active: false }) return (null, null); // we left; ignore quietly
+                if (!isMember) return (null, $"Dropped a group message from {sender}: they aren't in that group.");
+                return (_store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received, ctx.Id), null);
+
+            case "group_leave":
+                if (!isMember) return (null, null);
+                _store.PutGroup(group! with { Members = group.Members.Where(m => m != sender).ToList() });
+                return (_store.InsertMessage(sender, false, $"{sender} left.", sentAt, MessageStatus.Received, ctx.Id, isEvent: true), null);
+
+            case "group_update":
+                var members = ctx.Members ?? [];
+                var name = ctx.Name?.Trim() ?? "";
+                if (name.Length is 0 or > MaxGroupNameLength || members.Count > MaxGroupSize || !members.All(Usernames.IsValid)
+                    || !members.Contains(sender) || !members.Contains(Username!))
+                    return (null, $"Ignored a malformed group update from {sender}.");
+                var others = members.Where(m => m != Username).Distinct().Order().ToList();
+
+                if (group is not { Active: true })
+                {
+                    // We were added (or added back after leaving).
+                    _store.PutGroup(new Group(ctx.Id, name, others, group?.CreatedAt ?? Now));
+                    return (_store.InsertMessage(sender, false, $"{sender} added you to “{name}”.", sentAt, MessageStatus.Received, ctx.Id, isEvent: true), null);
+                }
+                if (!isMember) return (null, $"Ignored a group update from {sender}: they aren't in that group.");
+                var added = others.Except(group.Members).ToList();
+                if (added.Count == 0) return (null, null);
+                _store.PutGroup(group with { Members = group.Members.Concat(added).Order().ToList() });
+                return (_store.InsertMessage(sender, false, $"{sender} added {string.Join(", ", added)}.", sentAt, MessageStatus.Received, ctx.Id, isEvent: true), null);
+
+            default:
+                return (null, null); // from a newer version; nothing we can show
+        }
+    }
+
     // ================================================================ receiving
 
     /// <summary>
@@ -525,12 +761,16 @@ public sealed class Messenger : IDisposable
         RequireRegistered();
         var problems = new List<string>();
 
+        var reachable = true;
         foreach (var (messageId, peer, env) in _store.Outbox())
         {
             try { await DeliverAsync(messageId, peer, env, ct); }
-            catch (RelayException e) when (e.Status is null) { break; }
+            catch (RelayException e) when (e.Status is null) { reachable = false; break; }
             catch (RelayException e) { problems.Add($"Could not deliver a message to {peer}: {e.Message}"); }
         }
+        if (reachable)
+            foreach (var messageId in _store.GroupOutboxMessages())
+                if (!await DeliverCopiesAsync(messageId, problems, ct)) break;
 
         var received = new List<StoredMessage>();
         var changed = new List<string>();
@@ -587,10 +827,16 @@ public sealed class Messenger : IDisposable
             var content = JsonSerializer.Deserialize<MessageContent>(plaintext, WireJson.Options)
                 ?? throw new ProtocolException("empty message");
             var sentAt = DateTimeOffset.FromUnixTimeMilliseconds(content.SentAt);
-            var id = _store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received);
-            _store.MarkProcessed(item.Id, "ok");
+            // The session advanced either way, so the transaction commits even if the content is refused.
+            var (id, problem) = content switch
+            {
+                { Group: not null } => ReceiveGroup(sender, content, sentAt),
+                { Type: "text" } => ((long?)_store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received), (string?)null),
+                _ => ((long?)null, (string?)null),
+            };
+            _store.MarkProcessed(item.Id, problem is null ? "ok" : "refused");
             tx.Commit();
-            return new Outcome(_store.GetMessage(id), null, usedPrekey);
+            return new Outcome(id is { } stored ? _store.GetMessage(stored) : null, problem, usedPrekey);
         }
         catch (IdentityChangedException)
         {

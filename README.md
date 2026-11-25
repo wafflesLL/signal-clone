@@ -7,7 +7,8 @@ public prekey bundles and forwards ciphertext.
 
 Status: milestones 0–5 are done: the protocol, session layer, authenticated relay with push
 delivery, CLI, and a desktop app with safety numbers and key-change warnings, plus
-installable builds. Security demos and a usability check are next; see
+installable builds. Group chats (a stretch goal) are done too. Security demos and a
+usability check are next; see
 [docs/STRATEGY.md](docs/STRATEGY.md).
 
 ![Desktop app: a conversation](docs/screenshots/3-chat.png)
@@ -34,7 +35,7 @@ src/
     RelayClient.cs    signed HTTP client for the relay
   E2ee.Server/        untrusted relay: ASP.NET Core + SQLite, signed-request auth, push
   E2ee.Client/        CLI over E2ee.Messaging
-  E2ee.App/           Avalonia desktop app (sign-up, contacts, chat)
+  E2ee.App/           Avalonia desktop app (sign-up, contacts, chat, groups)
 tests/
   E2ee.Tests/
     PrimitivesTests.cs   RFC 7748 / 8032 / 5869 known-answer tests
@@ -42,6 +43,7 @@ tests/
     MessagingTests.cs    end to end: two profiles through an in-process relay
     RelayAuthTests.cs    signed requests: wrong key, stale, replayed, wrong path
     SafetyNumberTests.cs safety numbers, checked against scripts/safety_number_crosscheck.py
+    GroupTests.cs        group chats: fan-out, adding, leaving, non-members refused
     AppTests.cs          desktop app, rendered headlessly, against an in-process relay
   vectors/               deterministic protocol vectors we generate
 docs/STRATEGY.md         plan, milestones, evaluation, roles
@@ -94,6 +96,13 @@ verified*. If a contact's identity key ever changes (they reinstalled, or someon
 impersonating them), the app shows a red *Safety number changed* bar, pauses sending, and
 holds their new messages on the relay until you click *Review* and decide.
 
+**Group chats.** Click *New group*, name it, and list the members' usernames. Each message
+is encrypted separately for every member over your one-to-one sessions, so the relay never
+learns the group exists. In a group, *Add people* adds members and *Leave* leaves (you keep
+the history). Members can add people but can't remove anyone else.
+
+![Desktop app: a group chat](docs/screenshots/10-group-chat.png)
+
 ### Command line
 
 Each person uses their own profile. On one machine, two profiles stand in for two people.
@@ -117,8 +126,19 @@ dotnet run --project src/E2ee.Client -- --profile alice chat bob
 dotnet run --project src/E2ee.Client -- --profile bob chat alice
 ```
 
+Groups are named with a `#`:
+
+```bash
+dotnet run --project src/E2ee.Client -- --profile alice group-create Study bob,carol
+```
+
+```bash
+dotnet run --project src/E2ee.Client -- --profile bob chat "#Study"
+```
+
 Other commands: `send`, `sync`, `history`, `add`, `contacts`, `safety`, `verify`, `trust`,
-`whoami` (see `--help`).
+`groups`, `group-add`, `group-leave`, `whoami` (see `--help`). `send` and `history` also
+take a `#group`.
 
 Profiles live in `~/Library/Application Support/E2ee/<profile>` on macOS (`%LOCALAPPDATA%\E2ee`
 on Windows, `~/.local/share/E2ee` on Linux). Private keys, sessions, and message history are

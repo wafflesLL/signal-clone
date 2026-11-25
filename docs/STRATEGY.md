@@ -70,7 +70,7 @@ use AI), and a Canvas comment about AI use.
 | `E2ee.Core` | Protocol library: `Primitives.cs` (NSec + .NET BCL wrappers), `X3dh.cs`, `Ratchet.cs`. | Implemented; RFC vectors and protocol tests pass. |
 | `E2ee.Messaging` | Session layer shared by the app and CLI: account setup, prekey upload and refill, contact list, session manager (first message vs. ongoing), local storage, relay client, safety numbers. | Done. |
 | `E2ee.Server` | ASP.NET Core and SQLite relay: accounts, bundle store, inbox queues, real-time push. | Done: accounts, signed-request auth, acknowledged inboxes, long-poll push. |
-| `E2ee.App` | Avalonia desktop app: onboarding, contact list, chat view, safety-number screen, settings. | Sign-up, contacts, chat, unread badges, relay status, and identity-change warning done; safety numbers and settings are milestone 5. |
+| `E2ee.App` | Avalonia desktop app: onboarding, conversation list, chat view, group chats, safety-number screen. | Done: sign-up, contacts, chat, groups, unread badges, relay status, safety numbers, key-change review. No settings screen yet. |
 | `E2ee.Client` | Headless CLI over `E2ee.Messaging`, for scripted demos and integration tests. | Done. |
 
 **Language choice: C# on .NET 8.** X25519 and Ed25519 come from NSec.Cryptography, a thin
@@ -101,6 +101,21 @@ contact verified is stored locally. A key change clears it, raises a warning, pa
 sending, and holds the contact's new messages on the relay (unacknowledged) until the user
 reviews the new number and trusts the key. The user trusts exactly the key they reviewed,
 not whatever the relay holds at that moment.
+
+**Group chats.** Client-side fan-out, the way Signal handled groups before Sender Keys:
+a group message is encrypted separately for each member over the existing pairwise Double
+Ratchet sessions, with the group's random 128-bit id inside the ciphertext. The relay sees
+ordinary one-to-one messages and never learns that a group exists, who is in it, or which
+messages belong to it (it can still guess from timing, since one send produces several
+messages at once). So groups get the same forward secrecy, post-compromise security, and
+key-change protection as direct chats, and need no new cryptography. Every member keeps
+their own member list. Creating a group or adding someone sends a `group_update` with the
+name and full member list to everyone; leaving sends `group_leave`. A client accepts group
+messages and updates only from people currently in its copy of the list, so knowing a
+group's id isn't enough to post in it. Updates can only add people, so no member can kick
+another out; the only way out is to leave. Sending to a group is blocked while any member's
+safety number change is unresolved (leaving is not: it skips that member). The cost is N−1
+encryptions and uploads per message, which is fine for the 50-person cap.
 
 **Relay authentication.** Usernames are bound to an Ed25519 identity key on first
 registration (trust on first use at the server). Every request is signed with that key over
@@ -140,6 +155,10 @@ until the user runs `trust`.
 - Signal signs prekeys with XEdDSA under the X25519 identity key. Neither NSec nor the BCL
   has XEdDSA, so each identity has two keys: Ed25519 for signing and X25519 for DH. This
   is a common simplification, and the report will discuss why it is fine here.
+- Groups use client-side fan-out, not Sender Keys or Signal's private group system
+  (zero-knowledge group credentials), and not MLS. Membership is agreed only among the
+  members, with no server enforcing it, so a malicious member could tell different people
+  different member lists. Removing someone else from a group isn't supported.
 - One device per account. Signal's multi-device support (Sesame) is out of scope.
 - Contact discovery is by exact username, not by phone number.
 
@@ -156,7 +175,7 @@ Dates are relative to the start. Adjust them once the due date is known.
 | 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | Done; tested headlessly. Still to do: a hands-on run on macOS and Windows, and two laptops |
 | 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | Done, with long polling instead of SignalR. Builds are made by `scripts/package-app.sh` but not yet attached to a GitHub release. Not yet tested on a real screen or on Windows |
 | 6 | 4–5 | **Security demos** in tests and a scripted CLI demo: forward secrecy, post-compromise security, server-only-sees-ciphertext. Run a small usability check with a few classmates. | 4 | |
-| 7 | 5 | **Stretch**: attachments (encrypt the file, send the key in a message), then group messaging (sender keys). | 4, 5 | |
+| 7 | 5 | **Stretch**: group messaging, then attachments (encrypt the file, send the key in a message). | 4, 5 | Group chats done early, with client-side fan-out instead of sender keys (see Group chats). Attachments not started |
 | 8 | 5–6 | Report writing, figures and screenshots, artifact zip, transcripts. | all | |
 
 Write the report continuously. Background (§2) can be written while reading the specs,
@@ -229,7 +248,7 @@ Everyone writes their own subsection of §3 and §4. One person edits for a sing
 | Private keys leaked from disk | Encrypt them at rest with an OS-keychain key. Say in the report what this does not protect against (malware running as the user). |
 | Cross-platform packaging pain (macOS signing, Gatekeeper) | Ship unsigned builds with run instructions. Signing is a stretch goal. Test on both OSes from milestone 4 onward. |
 | No reference vectors | Use the interop cross-check described above. |
-| Group messaging is too big | It's a stretch goal. If groups slip, the report covers why (sender keys vs. MLS) in §5. |
+| Group messaging is too big | Done with client-side fan-out, which reuses the pairwise sessions. The report's §5 compares it with sender keys and MLS. |
 | Report crunch | Write §2 early and §3 by the end of milestone 3. Take screenshots as the app grows. |
 
 ## Workflow

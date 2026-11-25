@@ -68,10 +68,12 @@
             </TextBox>
             <Button Grid.Column="2" Content="Add" Command="{Binding AddContactCommand}" />
           </Grid>
+          <Button Name="NewGroupButton" Content="New group" Command="{Binding OpenNewGroupCommand}"
+                  HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
         </StackPanel>
 
         <TextBlock DockPanel.Dock="Top" Classes="muted" Margin="16,8" TextWrapping="Wrap"
-                   Text="No contacts yet. Add someone by their username to start a conversation."
+                   Text="No conversations yet. Add someone by their username, or start a group."
                    IsVisible="{Binding !Contacts.Count}" />
 
         <ListBox Name="ContactList" ItemsSource="{Binding Contacts}" SelectedItem="{Binding Selected}" Background="Transparent">
@@ -83,7 +85,7 @@
                              HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
                 <StackPanel Grid.Column="1" Margin="10,0,6,0" Orientation="Horizontal" Spacing="5" VerticalAlignment="Bottom">
-                  <TextBlock Text="{Binding Username}" FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                   <TextBlock Text="✓" Foreground="#2E9E6B" FontWeight="Bold" IsVisible="{Binding Verified}" ToolTip.Tip="Safety number verified" />
                   <TextBlock Text="⚠" Foreground="#D13438" IsVisible="{Binding IdentityChanged}" ToolTip.Tip="Safety number changed" />
                 </StackPanel>
@@ -111,7 +113,7 @@
       </Border>
 
       <TextBlock Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center"
-                 Text="Pick a contact, or add one on the left." IsVisible="{Binding !HasSelection}" />
+                 Text="Pick a conversation, or start one on the left." IsVisible="{Binding !HasSelection}" />
 
       <Panel IsVisible="{Binding HasSelection}">
         <DockPanel>
@@ -120,15 +122,23 @@
             <Grid ColumnDefinitions="*,Auto">
               <StackPanel>
                 <StackPanel Orientation="Horizontal" Spacing="8">
-                  <TextBlock Text="{Binding Selected.Username, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
+                  <TextBlock Text="{Binding Selected.Title, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
                   <Border Classes="badge verified" IsVisible="{Binding Selected.Verified, FallbackValue=False}" VerticalAlignment="Center">
                     <TextBlock Text="✓ Verified" />
                   </Border>
                 </StackPanel>
-                <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" />
+                <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" IsVisible="{Binding Selected.IsDirect, FallbackValue=False}" />
+                <TextBlock Classes="muted" FontSize="12" Text="{Binding Selected.MembersText, StringFormat='🔒 {0}', FallbackValue=''}"
+                           IsVisible="{Binding Selected.IsGroup, FallbackValue=False}" TextTrimming="CharacterEllipsis" />
               </StackPanel>
-              <Button Name="SafetyButton" Grid.Column="1" Content="Safety number" Command="{Binding ShowSafetyNumberCommand}"
-                      IsVisible="{Binding CanCompose}" VerticalAlignment="Center" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Name="SafetyButton" Content="Safety number" Command="{Binding ShowSafetyNumberCommand}"
+                        IsVisible="{Binding ShowSafetyButton}" />
+                <Button Name="AddPeopleButton" Content="Add people" Command="{Binding OpenAddMembersCommand}"
+                        IsVisible="{Binding CanManageGroup}" />
+                <Button Name="LeaveGroupButton" Content="Leave" Command="{Binding LeaveGroupCommand}"
+                        IsVisible="{Binding CanManageGroup}" />
+              </StackPanel>
             </Grid>
           </Border>
 
@@ -145,6 +155,12 @@
             </Grid>
           </Border>
 
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,10"
+                  IsVisible="{Binding Selected.HasLeft, FallbackValue=False}">
+            <TextBlock TextWrapping="Wrap" FontSize="13"
+                       Text="You left this group. You can still read the history, but you won't get new messages." />
+          </Border>
+
           <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
             <TextBox Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
               <TextBox.KeyBindings>
@@ -158,12 +174,19 @@
             <ItemsControl ItemsSource="{Binding Messages}">
               <ItemsControl.ItemTemplate>
                 <DataTemplate DataType="vm:MessageViewModel">
-                  <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}">
-                    <StackPanel>
-                      <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                      <TextBlock Classes="meta" Text="{Binding MetaText}" />
-                    </StackPanel>
-                  </Border>
+                  <Panel>
+                    <TextBlock Classes="muted" FontSize="12" Margin="0,8" HorizontalAlignment="Center" TextWrapping="Wrap"
+                               Text="{Binding Text}" IsVisible="{Binding IsEvent}" />
+                    <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}"
+                            IsVisible="{Binding IsBubble}">
+                      <StackPanel>
+                        <TextBlock Text="{Binding Sender}" FontSize="12" FontWeight="SemiBold" Opacity="0.8"
+                                   Margin="0,0,0,2" IsVisible="{Binding ShowSender}" />
+                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                        <TextBlock Classes="meta" Text="{Binding MetaText}" />
+                      </StackPanel>
+                    </Border>
+                  </Panel>
                 </DataTemplate>
               </ItemsControl.ItemTemplate>
             </ItemsControl>
@@ -211,5 +234,29 @@
         </Border>
       </Panel>
     </DockPanel>
+
+    <!-- New group / add people, over everything -->
+    <Border Grid.ColumnSpan="2" Background="#99000000" IsVisible="{Binding IsGroupFormOpen}">
+      <Border Width="420" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Background="{DynamicResource SystemControlBackgroundAltHighBrush}" DataContext="{Binding GroupForm}"
+              x:DataType="vm:GroupFormViewModel">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="title" FontSize="20" Text="{Binding Heading}" />
+          <TextBox Name="GroupNameBox" Text="{Binding Name}" Watermark="Group name" IsVisible="{Binding IsNew}" MaxLength="64" />
+          <TextBox Name="GroupMembersBox" Text="{Binding Members}" Watermark="Usernames, separated by commas">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding SubmitCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                     Text="Each message is encrypted separately for every member. The relay never learns the group exists." />
+          <TextBlock Text="{Binding Error}" Foreground="#D13438" TextWrapping="Wrap" IsVisible="{Binding HasError}" />
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Content="Cancel" Command="{Binding CloseCommand}" />
+            <Button Name="GroupSubmitButton" Content="{Binding SubmitText}" Command="{Binding SubmitCommand}" Classes="accent" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
   </Grid>
 </UserControl>

@@ -23,14 +23,23 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     public ObservableCollection<MessageViewModel> Messages { get; } = new();
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasSelection), nameof(CanCompose))]
-    [NotifyCanExecuteChangedFor(nameof(SendCommand), nameof(ShowSafetyNumberCommand))]
+    [NotifyPropertyChangedFor(nameof(HasSelection), nameof(CanCompose), nameof(ShowSafetyButton), nameof(CanManageGroup))]
+    [NotifyCanExecuteChangedFor(nameof(SendCommand), nameof(ShowSafetyNumberCommand), nameof(OpenAddMembersCommand), nameof(LeaveGroupCommand))]
     private ContactViewModel? _selected;
 
     public bool HasSelection => Selected is not null;
 
-    /// <summary>False while the open contact's key change is unresolved.</summary>
-    public bool CanCompose => Selected is { IdentityChanged: false };
+    /// <summary>False while a direct chat's key change is unresolved, or after leaving a group.</summary>
+    public bool CanCompose => Selected switch
+    {
+        { IsGroup: true } g => g.Active,
+        { } c => !c.IdentityChanged,
+        null => false,
+    };
+
+    public bool ShowSafetyButton => Selected is { IsGroup: false, IdentityChanged: false };
+
+    public bool CanManageGroup => Selected is { IsGroup: true, Active: true };
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
@@ -59,7 +68,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     public async Task StartAsync(bool push = true)
     {
         foreach (var c in await messenger.ConversationsAsync())
-            Contacts.Add(new ContactViewModel(c.Contact, c.Last));
+            Contacts.Add(c.Group is { } g ? new ContactViewModel(g, c.Last) : new ContactViewModel(c.Contact!, c.Last));
         await SyncNowAsync();
         if (push) _ = PushLoopAsync(_stop.Token);
     }
@@ -108,7 +117,9 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         Safety = null;
         if (contact is null) return;
         contact.Unread = 0;
-        var history = await messenger.HistoryAsync(contact.Username, 200);
+        var history = contact.IsGroup
+            ? await messenger.GroupHistoryAsync(contact.GroupId!, 200)
+            : await messenger.HistoryAsync(contact.Username, 200);
         if (Selected != contact) return; // the user clicked elsewhere meanwhile
         Messages.Clear();
         foreach (var m in history) Messages.Add(new MessageViewModel(m));
@@ -124,15 +135,18 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         Draft = "";
         try
         {
-            var msg = await messenger.SendAsync(peer.Username, text);
+            var msg = peer.IsGroup ? await messenger.SendGroupAsync(peer.GroupId!, text) : await messenger.SendAsync(peer.Username, text);
             if (Selected == peer) Messages.Add(new MessageViewModel(msg));
             peer.Update(msg);
             MoveToTop(peer);
             RelayOnline = msg.Status != MessageStatus.Pending;
         }
-        catch (IdentityChangedException)
+        catch (IdentityChangedException e)
         {
-            MarkIdentityChanged(peer.Username);
+            MarkIdentityChanged(e.Username);
+            if (peer.IsGroup)
+                Notice = $"{e.Username}'s safety number changed, so nothing was sent to this group. Open your chat with " +
+                         $"{e.Username} and review it first.";
             Draft = text;
         }
         catch (RelayException e) when (e.Status is null)
@@ -154,7 +168,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     private async Task AddContactAsync()
     {
         var name = NewContact.Trim().ToLowerInvariant();
-        if (Contacts.FirstOrDefault(c => c.Username == name) is { } existing)
+        if (Contacts.FirstOrDefault(c => c.IsDirect && c.Username == name) is { } existing)
         {
             Selected = existing;
             NewContact = "";
@@ -181,7 +195,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     // ---------------------------------------------------------------- safety numbers
 
-    private bool CanShowSafetyNumber() => Selected is not null;
+    private bool CanShowSafetyNumber() => Selected is { IsGroup: false };
 
     /// <summary>Opens the panel: the current number, or, after a key change, the new key's number to review.</summary>
     [RelayCommand(CanExecute = nameof(CanShowSafetyNumber))]
@@ -229,6 +243,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             Safety = null;
             Notice = null;
             OnPropertyChanged(nameof(CanCompose));
+            OnPropertyChanged(nameof(ShowSafetyButton));
             SendCommand.NotifyCanExecuteChanged();
             await SyncNowAsync(); // release messages that were on hold
         }
@@ -242,18 +257,135 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     private void MarkIdentityChanged(string username)
     {
-        if (Contacts.FirstOrDefault(c => c.Username == username) is not { } c) return;
+        if (Contacts.FirstOrDefault(c => c.IsDirect && c.Username == username) is not { } c) return;
         c.IdentityChanged = true;
         c.Verified = false;
         if (c == Selected)
         {
             OnPropertyChanged(nameof(CanCompose));
+            OnPropertyChanged(nameof(ShowSafetyButton));
             SendCommand.NotifyCanExecuteChanged();
         }
     }
 
     [RelayCommand]
     private void DismissNotice() => Notice = null;
+
+    // ---------------------------------------------------------------- groups
+
+    /// <summary>The new-group / add-people panel, when open.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsGroupFormOpen))]
+    private GroupFormViewModel? _groupForm;
+
+    public bool IsGroupFormOpen => GroupForm is not null;
+
+    [RelayCommand]
+    private void OpenNewGroup() => GroupForm = new GroupFormViewModel(this, null);
+
+    [RelayCommand(CanExecute = nameof(CanManageGroup))]
+    private void OpenAddMembers() => GroupForm = new GroupFormViewModel(this, Selected);
+
+    internal void CloseGroupForm() => GroupForm = null;
+
+    internal async Task CreateGroupAsync(string name, IReadOnlyList<string> members)
+    {
+        try
+        {
+            var group = await messenger.CreateGroupAsync(name, members);
+            var vm = new ContactViewModel(group, (await messenger.GroupHistoryAsync(group.Id, 1)).LastOrDefault());
+            Contacts.Insert(0, vm);
+            GroupForm = null;
+            Selected = vm;
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            GroupForm?.SetError(GroupError(e));
+        }
+    }
+
+    internal async Task AddMembersAsync(ContactViewModel group, IReadOnlyList<string> members)
+    {
+        try
+        {
+            group.Refresh(await messenger.AddGroupMembersAsync(group.GroupId!, members));
+            GroupForm = null;
+            await ShowLatestAsync(group);
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            GroupForm?.SetError(GroupError(e));
+        }
+    }
+
+    private string GroupError(Exception e)
+    {
+        if (e is RelayException { Status: null })
+        {
+            RelayOnline = false;
+            return "Can't reach the relay. Try again when it's back.";
+        }
+        if (e is IdentityChangedException ic)
+        {
+            MarkIdentityChanged(ic.Username);
+            return $"{ic.Username}'s safety number changed. Review it in your chat with {ic.Username} first.";
+        }
+        return e.Message;
+    }
+
+    [RelayCommand(CanExecute = nameof(CanManageGroup))]
+    private async Task LeaveGroupAsync()
+    {
+        var group = Selected!;
+        try
+        {
+            group.Refresh(await messenger.LeaveGroupAsync(group.GroupId!));
+            GroupStateChanged(group);
+            await ShowLatestAsync(group);
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            Notice = e is RelayException { Status: null } ? "Can't reach the relay to tell the group. Try again when it's back." : e.Message;
+        }
+    }
+
+    /// <summary>Adds the group's newest line (an event we just wrote) to the list and the open chat.</summary>
+    private async Task ShowLatestAsync(ContactViewModel group)
+    {
+        if ((await messenger.GroupHistoryAsync(group.GroupId!, 1)).LastOrDefault() is not { } last) return;
+        group.Update(last);
+        MoveToTop(group);
+        if (Selected == group && Messages.All(m => m.Id != last.Id)) Messages.Add(new MessageViewModel(last));
+    }
+
+    private void GroupStateChanged(ContactViewModel group)
+    {
+        if (group != Selected) return;
+        OnPropertyChanged(nameof(CanCompose));
+        OnPropertyChanged(nameof(CanManageGroup));
+        SendCommand.NotifyCanExecuteChanged();
+        OpenAddMembersCommand.NotifyCanExecuteChanged();
+        LeaveGroupCommand.NotifyCanExecuteChanged();
+    }
+
+    private ContactViewModel ConversationFor(StoredMessage msg)
+    {
+        if (msg.GroupId is { } id)
+        {
+            var group = Contacts.FirstOrDefault(c => c.GroupId == id);
+            if (msg.IsEvent || group is null)
+            {
+                var stored = messenger.GetGroup(id)!;
+                if (group is null) Contacts.Insert(0, group = new ContactViewModel(stored));
+                else group.Refresh(stored);
+                GroupStateChanged(group);
+            }
+            return group;
+        }
+        var contact = Contacts.FirstOrDefault(c => c.IsDirect && c.Username == msg.Peer);
+        if (contact is null) Contacts.Insert(0, contact = new ContactViewModel(msg.Peer));
+        return contact;
+    }
 
     // ---------------------------------------------------------------- delivery
 
@@ -268,12 +400,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             RelayOnline = true;
             foreach (var msg in result.Received)
             {
-                var contact = Contacts.FirstOrDefault(c => c.Username == msg.Peer);
-                if (contact is null)
-                {
-                    contact = new ContactViewModel(msg.Peer);
-                    Contacts.Insert(0, contact);
-                }
+                var contact = ConversationFor(msg);
                 contact.Update(msg);
                 MoveToTop(contact);
                 if (Selected == contact) Messages.Add(new MessageViewModel(msg));
@@ -300,7 +427,8 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     private async Task RefreshStatusesAsync(ContactViewModel open)
     {
-        var byId = (await messenger.HistoryAsync(open.Username, 200)).ToDictionary(m => m.Id);
+        var history = open.IsGroup ? await messenger.GroupHistoryAsync(open.GroupId!, 200) : await messenger.HistoryAsync(open.Username, 200);
+        var byId = history.ToDictionary(m => m.Id);
         if (Selected != open) return;
         foreach (var vm in Messages)
             if (byId.TryGetValue(vm.Id, out var stored)) vm.Status = stored.Status;
@@ -360,4 +488,52 @@ public sealed partial class SafetyNumberViewModel : ViewModelBase
     [RelayCommand] private Task TrustAndVerifyAsync() => _shell.TrustAsync(Peer, _check!, verified: true);
     [RelayCommand] private Task TrustWithoutVerifyingAsync() => _shell.TrustAsync(Peer, _check!, verified: false);
     [RelayCommand] private void Close() => _shell.CloseSafety();
+}
+
+/// <summary>The panel for creating a group, or for adding people to the open one.</summary>
+public sealed partial class GroupFormViewModel : ViewModelBase
+{
+    private readonly ShellViewModel _shell;
+    private readonly ContactViewModel? _group;
+
+    internal GroupFormViewModel(ShellViewModel shell, ContactViewModel? addTo)
+    {
+        _shell = shell;
+        _group = addTo;
+    }
+
+    public bool IsNew => _group is null;
+    public string Heading => IsNew ? "New group" : $"Add people to {_group!.Title}";
+    public string SubmitText => IsNew ? "Create group" : "Add";
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SubmitCommand))]
+    private string _name = "";
+
+    /// <summary>Usernames separated by commas or spaces.</summary>
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(SubmitCommand))]
+    private string _members = "";
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasError))]
+    private string? _error;
+
+    public bool HasError => Error is not null;
+
+    internal void SetError(string message) => Error = message;
+
+    private List<string> MemberList() =>
+        Members.Split(new[] { ',', ' ', ';', '\n' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+
+    private bool CanSubmit() => MemberList().Count > 0 && (!IsNew || !string.IsNullOrWhiteSpace(Name));
+
+    [RelayCommand(CanExecute = nameof(CanSubmit))]
+    private Task SubmitAsync()
+    {
+        Error = null;
+        return IsNew ? _shell.CreateGroupAsync(Name, MemberList()) : _shell.AddMembersAsync(_group!, MemberList());
+    }
+
+    [RelayCommand] private void Close() => _shell.CloseGroupForm();
 }
