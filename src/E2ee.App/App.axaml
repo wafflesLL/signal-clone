@@ -1,0 +1,29 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             xmlns:v="using:E2ee.App.Views"
+             x:Class="E2ee.App.App"
+             Name="E2EE Messenger"
+             RequestedThemeVariant="Default">
+
+  <Application.DataTemplates>
+    <DataTemplate DataType="vm:OnboardingViewModel"><v:OnboardingView /></DataTemplate>
+    <DataTemplate DataType="vm:ShellViewModel"><v:ShellView /></DataTemplate>
+    <DataTemplate DataType="vm:ErrorViewModel"><v:ErrorView /></DataTemplate>
+  </Application.DataTemplates>
+
+  <Application.Styles>
+    <FluentTheme />
+    <Style Selector="TextBlock.title">
+      <Setter Property="FontSize" Value="24" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.muted">
+      <Setter Property="Opacity" Value="0.65" />
+    </Style>
+    <Style Selector="TextBlock.error">
+      <Setter Property="Foreground" Value="#D13438" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+  </Application.Styles>
+</Application>

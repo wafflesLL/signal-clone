@@ -1,0 +1,139 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             x:Class="E2ee.App.Views.ShellView"
+             x:DataType="vm:ShellViewModel">
+  <UserControl.Styles>
+    <Style Selector="Border.bubble">
+      <Setter Property="MaxWidth" Value="460" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="Margin" Value="0,3" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundBaseLowBrush}" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundAccentBrush}" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing SelectableTextBlock, Border.bubble.outgoing TextBlock">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Border.bubble.failed">
+      <Setter Property="Background" Value="#D13438" />
+    </Style>
+    <Style Selector="TextBlock.meta">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Opacity" Value="0.7" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+    <Style Selector="Border.pane">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid ColumnDefinitions="290,*">
+
+    <!-- Contacts -->
+    <Border Classes="pane" Grid.Column="0">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Margin="16,16,16,8" Spacing="10">
+          <StackPanel Spacing="2">
+            <TextBlock Text="{Binding Me}" FontSize="18" FontWeight="SemiBold" />
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Ellipse Width="8" Height="8" Fill="#2E9E6B" IsVisible="{Binding RelayOnline}" VerticalAlignment="Center" />
+              <Ellipse Width="8" Height="8" Fill="#D13438" IsVisible="{Binding !RelayOnline}" VerticalAlignment="Center" />
+              <TextBlock Classes="muted" FontSize="12" Text="{Binding ServerText}" IsVisible="{Binding RelayOnline}" />
+              <TextBlock Classes="muted" FontSize="12" Text="Relay unreachable, retrying…" IsVisible="{Binding !RelayOnline}" />
+            </StackPanel>
+          </StackPanel>
+          <Grid ColumnDefinitions="*,6,Auto">
+            <TextBox Name="NewContactBox" Text="{Binding NewContact}" Watermark="Add someone by username">
+              <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding AddContactCommand}" />
+              </TextBox.KeyBindings>
+            </TextBox>
+            <Button Grid.Column="2" Content="Add" Command="{Binding AddContactCommand}" />
+          </Grid>
+        </StackPanel>
+
+        <TextBlock DockPanel.Dock="Top" Classes="muted" Margin="16,8" TextWrapping="Wrap"
+                   Text="No contacts yet. Add someone by their username to start a conversation."
+                   IsVisible="{Binding !Contacts.Count}" />
+
+        <ListBox Name="ContactList" ItemsSource="{Binding Contacts}" SelectedItem="{Binding Selected}" Background="Transparent">
+          <ListBox.ItemTemplate>
+            <DataTemplate DataType="vm:ContactViewModel">
+              <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="21,21" Margin="0,4">
+                <Border Grid.RowSpan="2" Width="40" Height="40" CornerRadius="20" Background="{Binding AvatarBrush}" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <TextBlock Grid.Column="1" Margin="10,0,6,0" Text="{Binding Username}" FontWeight="SemiBold" VerticalAlignment="Bottom" />
+                <TextBlock Grid.Column="2" Classes="muted" FontSize="11" Text="{Binding TimeText}" VerticalAlignment="Bottom" HorizontalAlignment="Right" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Margin="10,1,6,0" Classes="muted" FontSize="13"
+                           Text="{Binding Preview}" TextTrimming="CharacterEllipsis" VerticalAlignment="Top" />
+                <Border Grid.Row="1" Grid.Column="2" IsVisible="{Binding HasUnread}" CornerRadius="9" MinWidth="18" Height="18"
+                        Padding="5,0" Background="{DynamicResource SystemControlBackgroundAccentBrush}" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding Unread}" Foreground="White" FontSize="11" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+    </Border>
+
+    <!-- Conversation -->
+    <DockPanel Grid.Column="1">
+      <Border DockPanel.Dock="Top" IsVisible="{Binding HasNotice}" Background="#FFF4CE" Padding="12,8">
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock Text="{Binding Notice}" Foreground="#3B2F00" TextWrapping="Wrap" VerticalAlignment="Center" />
+          <Button Grid.Column="1" Content="Dismiss" Command="{Binding DismissNoticeCommand}" Margin="8,0,0,0" />
+        </Grid>
+      </Border>
+
+      <TextBlock Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center"
+                 Text="Pick a contact, or add one on the left." IsVisible="{Binding !HasSelection}" />
+
+      <DockPanel IsVisible="{Binding HasSelection}">
+        <Border DockPanel.Dock="Top" Padding="20,12" BorderThickness="0,0,0,1"
+                BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+          <Grid ColumnDefinitions="*,Auto">
+            <StackPanel>
+              <TextBlock Text="{Binding Selected.Username, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
+              <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" />
+            </StackPanel>
+            <Button Grid.Column="1" Content="Trust new key" Command="{Binding TrustNewKeyCommand}" Background="#D13438" Foreground="White"
+                    IsVisible="{Binding Selected.IdentityChanged, FallbackValue=False}" />
+          </Grid>
+        </Border>
+
+        <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,8,Auto" Margin="16,8,16,16">
+          <TextBox Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <Button Grid.Column="2" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
+        </Grid>
+
+        <ScrollViewer Name="MessageScroller" Padding="20,10">
+          <ItemsControl ItemsSource="{Binding Messages}">
+            <ItemsControl.ItemTemplate>
+              <DataTemplate DataType="vm:MessageViewModel">
+                <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}">
+                  <StackPanel>
+                    <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                    <TextBlock Classes="meta" Text="{Binding MetaText}" />
+                  </StackPanel>
+                </Border>
+              </DataTemplate>
+            </ItemsControl.ItemTemplate>
+          </ItemsControl>
+        </ScrollViewer>
+      </DockPanel>
+    </DockPanel>
+  </Grid>
+</UserControl>

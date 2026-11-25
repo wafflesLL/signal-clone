@@ -1,0 +1,10 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:vm="using:E2ee.App.ViewModels"
+        x:Class="E2ee.App.Views.MainWindow"
+        x:DataType="vm:MainWindowViewModel"
+        Title="{Binding Title}"
+        Width="980" Height="640" MinWidth="640" MinHeight="420"
+        WindowStartupLocation="CenterScreen">
+  <ContentControl Content="{Binding Current}" />
+</Window>

@@ -5,8 +5,11 @@ and Windows). X3DH handles initial key agreement, and the Double Ratchet derives
 per message, giving forward secrecy and post-compromise security. The relay server only stores
 public prekey bundles and forwards ciphertext.
 
-Status: the protocol, the session layer, the authenticated relay, and a CLI client work end
-to end (milestone 3). The Avalonia desktop app is next; see [docs/STRATEGY.md](docs/STRATEGY.md).
+Status: the protocol, session layer, authenticated relay, CLI, and a desktop app MVP work
+end to end (milestones 0–4). Safety numbers, push delivery, and packaged builds are next; see
+[docs/STRATEGY.md](docs/STRATEGY.md).
+
+![Desktop app: a conversation](docs/screenshots/3-chat.png)
 
 All primitives come from vetted libraries: X25519 and Ed25519 from
 [NSec](https://nsec.rocks) (libsodium), and HKDF-SHA256, HMAC-SHA256, and AES-256-GCM from
@@ -29,13 +32,14 @@ src/
     RelayClient.cs    signed HTTP client for the relay
   E2ee.Server/        untrusted relay: ASP.NET Core + SQLite, signed-request auth
   E2ee.Client/        CLI over E2ee.Messaging
-  E2ee.App/           Avalonia desktop app (milestone 4, planned)
+  E2ee.App/           Avalonia desktop app (sign-up, contacts, chat)
 tests/
   E2ee.Tests/
     PrimitivesTests.cs   RFC 7748 / 8032 / 5869 known-answer tests
     ProtocolTests.cs     X3DH and Double Ratchet properties
     MessagingTests.cs    end to end: two profiles through an in-process relay
     RelayAuthTests.cs    signed requests: wrong key, stale, replayed, wrong path
+    AppTests.cs          desktop app, rendered headlessly, against an in-process relay
   vectors/               deterministic protocol vectors we generate
 docs/STRATEGY.md         plan, milestones, evaluation, roles
 report/                  ACM acmart LaTeX report (sigconf)
@@ -60,6 +64,25 @@ network, and put it behind HTTPS for anything beyond a LAN demo:
 ```bash
 dotnet run --project src/E2ee.Server --urls http://127.0.0.1:8000
 ```
+
+### Desktop app
+
+```bash
+dotnet run --project src/E2ee.App
+```
+
+The first launch asks for a username and the relay address. To try two people on one
+machine, start a second copy with its own profile:
+
+```bash
+dotnet run --project src/E2ee.App -- --profile bob
+```
+
+The app checks for new messages every two seconds. Options: `--profile NAME`,
+`--data-dir DIR`, `--server URL` (pre-fills sign-up), `--key-file`. The screen must be
+awake and unlocked when it starts; macOS gives a locked session no display to render to.
+
+### Command line
 
 Each person uses their own profile. On one machine, two profiles stand in for two people.
 Register each once (the relay URL is remembered):
@@ -90,6 +113,9 @@ encrypted with a per-profile master key kept in the macOS Keychain or Windows DP
 `--key-file` to keep it in a file in the profile instead. The relay writes `relay.sqlite3`
 (override with the `E2EE_DB` environment variable) and only ever holds public keys and
 ciphertext.
+
+Screenshots in `docs/screenshots/` come from the UI tests. Regenerate them with
+`E2EE_SCREENSHOTS=docs/screenshots dotnet test`.
 
 ## Report
 

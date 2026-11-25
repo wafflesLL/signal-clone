@@ -70,7 +70,7 @@ use AI), and a Canvas comment about AI use.
 | `E2ee.Core` | Protocol library: `Primitives.cs` (NSec + .NET BCL wrappers), `X3dh.cs`, `Ratchet.cs`. | Implemented; RFC vectors and protocol tests pass. |
 | `E2ee.Messaging` | Session layer shared by the app and CLI: account setup, prekey upload and refill, contact list, session manager (first message vs. ongoing), local storage, relay client, safety numbers. | Done except safety numbers (milestone 5). |
 | `E2ee.Server` | ASP.NET Core and SQLite relay: accounts, bundle store, inbox queues, real-time push. | Accounts, signed-request auth, and acknowledged inboxes done; push is milestone 5. |
-| `E2ee.App` | Avalonia desktop app: onboarding, contact list, chat view, safety-number screen, settings. | To build. |
+| `E2ee.App` | Avalonia desktop app: onboarding, contact list, chat view, safety-number screen, settings. | Sign-up, contacts, chat, unread badges, relay status, and identity-change warning done; safety numbers and settings are milestone 5. |
 | `E2ee.Client` | Headless CLI over `E2ee.Messaging`, for scripted demos and integration tests. | Done. |
 
 **Language choice: C# on .NET 8.** X25519 and Ed25519 come from NSec.Cryptography, a thin
@@ -136,7 +136,7 @@ Dates are relative to the start. Adjust them once the due date is known.
 | 1 | 1 | **X3DH**: both sides derive the same SK, with and without an OPK. Bad SPK signature rejected. OPK deleted after use. Cross-checked against an independent implementation. | 3, 4 | Done except the cross-check |
 | 2 | 1–2 | **Double Ratchet**: ping-pong, out-of-order delivery, dropped messages, MAX_SKIP, tamper and replay rejection, state rollback on failure. | 3, 4 | Done |
 | 3 | 2–3 | **Session layer and authenticated relay**: `E2ee.Messaging` with persistent encrypted local state, account registration, signed relay requests, prekey refill. The CLI rebuilt on it: two terminals on two machines chatting, surviving restarts. | 3, 4 | Done (tested on one machine; try two machines on a LAN) |
-| 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | |
+| 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | Done; tested headlessly. Still to do: a hands-on run on macOS and Windows, and two laptops |
 | 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | |
 | 6 | 4–5 | **Security demos** in tests and a scripted CLI demo: forward secrecy, post-compromise security, server-only-sees-ciphertext. Run a small usability check with a few classmates. | 4 | |
 | 7 | 5 | **Stretch**: attachments (encrypt the file, send the key in a message), then group messaging (sender keys). | 4, 5 | |
@@ -148,7 +148,7 @@ and Design (§3) gets drafted as soon as milestone 3's interfaces settle.
 ## Correctness strategy ("test vectors")
 
 Signal doesn't publish official X3DH or Double Ratchet test vectors, so the email's
-"test against known test vectors" becomes four layers:
+"test against known test vectors" becomes five layers:
 
 1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in
    `tests/E2ee.Tests/PrimitivesTests.cs` and pass.
@@ -162,6 +162,9 @@ Signal doesn't publish official X3DH or Double Ratchet test vectors, so the emai
    relay (`WebApplicationFactory`), covering first contact, restarts mid-conversation,
    OPK exhaustion, an unauthenticated inbox read being rejected, and a contact's identity
    key changing. These are in `MessagingTests.cs` and `RelayAuthTests.cs` and pass.
+5. **UI tests**: the real Avalonia views rendered headlessly (Skia) and driven with
+   keyboard input against an in-process relay (`AppTests.cs`). They also produce the
+   screenshots in `docs/screenshots/`.
 
 The report should say this plainly: "no official vectors exist, so we did X". A reviewer
 trusts a plain statement like that more than an overclaim.

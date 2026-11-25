@@ -37,9 +37,12 @@ public sealed record PrekeyPolicy
     public TimeSpan CheckInterval { get; init; } = TimeSpan.FromMinutes(10);
 }
 
+public sealed record Conversation(Contact Contact, StoredMessage? Last);
+
 public sealed record SyncResult(IReadOnlyList<StoredMessage> Received, IReadOnlyList<string> Problems);
 
 public class MessengerException(string message) : Exception(message);
+public sealed class NoRelayConfiguredException() : MessengerException("No relay URL given and none saved in this profile. Register first.");
 public sealed class ProfileInUseException(string dir) : MessengerException($"Profile {dir} is already open in another process.");
 public sealed class UsernameTakenException(string user) : MessengerException($"The username '{user}' is already registered to someone else.");
 public sealed class UserNotFoundException(string user) : MessengerException($"No user named '{user}' is registered on this relay.");
@@ -91,7 +94,7 @@ public sealed class Messenger : IDisposable
             var requested = o.HttpClient?.BaseAddress ?? o.Server;
             if (saved is not null && requested is not null && Normalize(saved) != Normalize(requested))
                 throw new MessengerException($"This profile is registered on {saved}, not {requested}.");
-            var server = requested ?? saved ?? throw new MessengerException("No relay URL given and none saved in this profile.");
+            var server = requested ?? saved ?? throw new NoRelayConfiguredException();
             var http = o.HttpClient ?? new HttpClient { BaseAddress = Normalize(server), Timeout = TimeSpan.FromSeconds(15) };
 
             var m = new Messenger(store, new RelayClient(http), http, o.HttpClient is null, lockFile, o.Prekeys);
@@ -122,18 +125,31 @@ public sealed class Messenger : IDisposable
         if (Username is not null) _relay.SetIdentity(Username, _identity.SigPriv);
     }
 
+    /// <summary>Waits for an operation in progress to finish, then closes the profile.</summary>
     public void Dispose()
     {
+        _gate.Wait();
         _store.Dispose();
         if (_ownsHttp) _http.Dispose();
         _lock.Dispose();
         _gate.Dispose();
     }
 
+    // Every operation runs one at a time, off the caller's thread. Running the body on the
+    // thread pool means no continuation needs a UI thread, so a UI can never deadlock here.
     private async Task<T> Locked<T>(Func<Task<T>> body)
     {
-        await _gate.WaitAsync();
-        try { return await body(); }
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try { return await Task.Run(body).ConfigureAwait(false); }
+        finally { _gate.Release(); }
+    }
+
+    private Task<T> Locked<T>(Func<T> body) => Locked(() => Task.FromResult(body()));
+
+    private T LockedSync<T>(Func<T> body)
+    {
+        _gate.Wait();
+        try { return body(); }
         finally { _gate.Release(); }
     }
 
@@ -259,9 +275,16 @@ public sealed class Messenger : IDisposable
 
     // ================================================================ contacts
 
-    public IReadOnlyList<Contact> Contacts() => _store.Contacts();
+    public IReadOnlyList<Contact> Contacts() => LockedSync<IReadOnlyList<Contact>>(_store.Contacts);
 
-    public Contact? GetContact(string username) => _store.GetContact(username);
+    public Contact? GetContact(string username) => LockedSync(() => _store.GetContact(username));
+
+    /// <summary>Every contact with their latest message, most recent activity first.</summary>
+    public Task<IReadOnlyList<Conversation>> ConversationsAsync() => Locked<IReadOnlyList<Conversation>>(() =>
+        _store.Contacts()
+            .Select(c => new Conversation(c, _store.History(c.Username, 1).FirstOrDefault()))
+            .OrderByDescending(c => c.Last?.SentAt ?? c.Contact.AddedAt)
+            .ToList());
 
     /// <summary>Looks the user up on the relay and remembers their identity key (trust on first use).</summary>
     public Task<Contact> AddContactAsync(string username, CancellationToken ct = default) => Locked(async () =>
@@ -311,7 +334,10 @@ public sealed class Messenger : IDisposable
 
     // ================================================================ history
 
-    public IReadOnlyList<StoredMessage> History(string peer, int limit = 50) => _store.History(peer, limit);
+    public IReadOnlyList<StoredMessage> History(string peer, int limit = 50) => LockedSync<IReadOnlyList<StoredMessage>>(() => _store.History(peer, limit));
+
+    public Task<IReadOnlyList<StoredMessage>> HistoryAsync(string peer, int limit = 50) =>
+        Locked<IReadOnlyList<StoredMessage>>(() => _store.History(peer, limit));
 
     // ================================================================ sending
 

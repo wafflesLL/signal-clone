@@ -10,6 +10,8 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Avalonia.Headless.XUnit" Version="11.3.23" />
+    <PackageReference Include="Avalonia.Skia" Version="11.3.23" />
     <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="8.0.11" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.6.0" />
     <PackageReference Include="xunit" Version="2.4.2" />
@@ -27,6 +29,7 @@
     <ProjectReference Include="..\..\src\E2ee.Core\E2ee.Core.csproj" />
     <ProjectReference Include="..\..\src\E2ee.Server\E2ee.Server.csproj" />
     <ProjectReference Include="..\..\src\E2ee.Messaging\E2ee.Messaging.csproj" />
+    <ProjectReference Include="..\..\src\E2ee.App\E2ee.App.csproj" />
   </ItemGroup>
 
 </Project>
