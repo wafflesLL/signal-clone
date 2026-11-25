@@ -442,7 +442,10 @@ public sealed class AppTests : IDisposable
             Assert.True(Application.Current!.TryGetResource("IncomingBubbleBrush", theme, out var res));
             var bubble = ((Avalonia.Media.ISolidColorBrush)res!).Color;
             Assert.Equal(SenderColors.Count, palette.Distinct().Count());
-            foreach (var hex in palette)
+            Assert.True(Application.Current.TryGetResource("LinkBrush", theme, out var link));
+            // The sender names, plus the "Show more" link color.
+            string[] colors = [.. palette, ((Avalonia.Media.ISolidColorBrush)link!).Color.ToString().Replace("#ff", "#")];
+            foreach (var hex in colors)
             {
                 var c = Avalonia.Media.Color.Parse(hex);
                 Assert.True(Contrast(c, bubble) >= 4.5, $"{hex} on the {theme} bubble: {Contrast(c, bubble):F2}:1");
@@ -532,8 +535,57 @@ public sealed class AppTests : IDisposable
         File.WriteAllText(script, "echo hi");
         shell.Draft = "keep me";
         await shell.SendFileAsync(script);
-        Assert.Contains("Only images and videos", shell.Notice);
+        Assert.Contains("can't be sent", shell.Notice);
         Assert.Equal("keep me", shell.Draft);
+        vm.Dispose();
+        Directory.Delete(files, recursive: true);
+    }
+
+    [AvaloniaFact]
+    public async Task LongMessagesCollapseAndDocumentsShowAsCards()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        shell.NewContact = "bob";
+        await shell.AddContactCommand.ExecuteAsync(null);
+        Assert.Equal(Messenger.MaxTextLength, Find<TextBox>(window, "DraftBox").MaxLength);
+
+        var essay = string.Join(" ", Enumerable.Range(1, 400).Select(i => $"word{i}"));
+        await bob.SendAsync("alice", essay);
+        await bob.SendAsync("alice", "short one");
+        var files = Path.Combine(Path.GetTempPath(), $"e2ee-app-docs-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(files);
+        File.WriteAllBytes(Path.Combine(files, "Project report draft.pdf"), new byte[52_000]);
+        await bob.SendFileAsync("alice", Path.Combine(files, "Project report draft.pdf"), "comments welcome");
+        await shell.SyncNowAsync();
+        await Settle();
+
+        var (longOne, shortOne, doc) = (shell.Messages[0], shell.Messages[1], shell.Messages[2]);
+        Assert.True(longOne.IsLong);
+        Assert.False(shortOne.IsLong);
+        Assert.EndsWith("…", longOne.DisplayText);
+        Assert.True(longOne.DisplayText.Length <= MessageViewModel.CollapseChars + 1);
+        Assert.Equal("Show more", longOne.ShowMoreText);
+        Assert.True(Find<Button>(window, "ShowMoreButton").IsEffectivelyVisible);
+
+        Assert.True(doc.ShowFileCard);
+        Assert.Equal("📄  Project report draft.pdf · 51 KB", doc.FileLabel);
+        Assert.Equal("📄 comments welcome", shell.Selected!.Preview);
+        Screenshot(window, "13-long-message-and-document");
+
+        longOne.ToggleExpandedCommand.Execute(null);
+        Assert.Equal(essay, longOne.DisplayText);
+        Assert.Equal("Show less", longOne.ShowMoreText);
+        longOne.ToggleExpandedCommand.Execute(null);
+        Assert.EndsWith("…", longOne.DisplayText);
+
+        // Many short lines collapse too.
+        var lines = string.Join("\n", Enumerable.Range(1, 30).Select(i => $"line {i}"));
+        Assert.True(new MessageViewModel(new StoredMessage(1, "bob", false, lines, DateTimeOffset.Now, MessageStatus.Received)).IsLong);
         vm.Dispose();
         Directory.Delete(files, recursive: true);
     }

@@ -184,7 +184,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     public string DownloadsFolder { get; set; } =
         Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
 
-    /// <summary>True while a photo or video is being encrypted and uploaded.</summary>
+    /// <summary>True while an attachment is being encrypted and uploaded.</summary>
     [ObservableProperty] private bool _isUploading;
 
     /// <summary>Sends an image or video to the open chat, with the draft as its caption.</summary>

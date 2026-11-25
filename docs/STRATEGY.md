@@ -117,7 +117,7 @@ another out; the only way out is to leave. Sending to a group is blocked while a
 safety number change is unresolved (leaving is not: it skips that member). The cost is N−1
 encryptions and uploads per message, which is fine for the 50-person cap.
 
-**Photos, videos, and reactions.** Media is stored on the users' devices; the relay only
+**Photos, videos, documents, and reactions.** Files are stored on the users' devices; the relay only
 passes it along. The sender reads the file, picks a fresh random 256-bit key, encrypts it
 with AES-256-GCM (associated data `COSC483-ATTACHMENT-v1`), and uploads the ciphertext to
 `POST /v1/attachments?to=…`, naming who may fetch it. The ratchet message then carries a
@@ -127,8 +127,11 @@ named recipients), checks the hash and size, decrypts, writes the file into the 
 `media/` folder encrypted under the master key, and acknowledges. The relay deletes the blob
 once every recipient has acknowledged it, or after 14 days. So the relay never sees a key,
 a file name, or plaintext, and holds ciphertext only in transit. One upload serves a whole
-group, while the pointer is fanned out like any group message. Only images and videos are
-accepted (up to 100 MB), and the type is always taken from our own list by file extension,
+group, while the pointer is fanned out like any group message. Only images, videos,
+and documents are accepted (up to 100 MB): PDF, plain text, Markdown, CSV, RTF, and the
+Office Open XML and OpenDocument formats. Formats that can carry code or macros when opened
+are left out on purpose (.doc/.xls/.ppt, macro-enabled Office files, HTML, SVG, ZIP,
+programs and scripts). The type is always taken from our own list by file extension,
 never from what the sender claims; when a file is opened in another app, its extension comes
 from that type too, so a message can't smuggle in a program disguised as a video. Opening a
 file writes a plaintext copy to the profile's `open/` folder, which is emptied when the app
@@ -138,6 +141,11 @@ A reaction is a small ratchet message naming the target by its author and send t
 (as Signal does), plus the emoji, or none to take it back. Each person has at most one
 reaction per message. In groups, reactions are accepted only from members, and in direct
 chats only for messages between the two people.
+
+**Message length.** Text and captions are capped at 16,000 characters, so that every
+encrypted message stays under the relay's 128 KB limit even in the worst case (characters
+JSON must escape take 6 bytes each); a test sends exactly that worst case. The app shows
+long messages (over 700 characters or 12 lines) shortened, with *Show more*.
 
 **Relay authentication.** Usernames are bound to an Ed25519 identity key on first
 registration (trust on first use at the server). Every request is signed with that key over

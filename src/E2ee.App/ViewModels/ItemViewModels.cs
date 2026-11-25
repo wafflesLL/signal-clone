@@ -101,7 +101,7 @@ public sealed partial class ContactViewModel : ViewModelBase
     {
         var who = m.IsEvent ? "" : m.Outgoing ? "You: " : IsGroup ? $"{m.Peer}: " : "";
         var body = m.Text.ReplaceLineEndings(" ");
-        if (m.Attachment is { } a) body = (a.IsVideo ? "🎬 " : "📷 ") + (body.Length > 0 ? body : a.IsVideo ? "Video" : "Photo");
+        if (m.Attachment is { } a) body = $"{a.Icon} " + (body.Length > 0 ? body : a.IsDocument ? a.FileName : a.Kind);
         Preview = who + body;
         TimeText = Display.Time(m.SentAt);
     }
@@ -133,12 +133,48 @@ public sealed partial class MessageViewModel : ViewModelBase
         _inGroup = m.GroupId is not null;
         ShowSender = _inGroup && !m.Outgoing && !m.IsEvent;
         _time = Display.Time(m.SentAt);
+        _collapsed = Collapse(m.Text);
         Update(m);
     }
 
     public long Id { get; }
     public string Text { get; }
     public bool HasText => Text.Length > 0;
+
+    // ---------------------------------------------------------------- long messages
+
+    /// <summary>Messages longer than this many characters or lines are shown shortened, with "Show more".</summary>
+    public const int CollapseChars = 700, CollapseLines = 12;
+
+    private readonly string? _collapsed;
+
+    /// <summary>The shortened text, or null if the message is short enough to show whole.</summary>
+    private static string? Collapse(string text)
+    {
+        var lines = text.Split('\n');
+        if (text.Length <= CollapseChars && lines.Length <= CollapseLines) return null;
+        var cut = string.Join('\n', lines.Take(CollapseLines));
+        if (cut.Length > CollapseChars)
+        {
+            cut = cut[..CollapseChars];
+            // End on a word boundary when there is one nearby, and never split a surrogate pair.
+            var space = cut.LastIndexOfAny([' ', '\n']);
+            if (space > CollapseChars - 80) cut = cut[..space];
+            else if (char.IsHighSurrogate(cut[^1])) cut = cut[..^1];
+        }
+        return cut.TrimEnd() + "…";
+    }
+
+    public bool IsLong => _collapsed is not null;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayText), nameof(ShowMoreText))]
+    private bool _expanded;
+
+    public string DisplayText => _collapsed is null || Expanded ? Text : _collapsed;
+    public string ShowMoreText => Expanded ? "Show less" : "Show more";
+
+    [RelayCommand] private void ToggleExpanded() => Expanded = !Expanded;
     public bool Outgoing { get; }
 
     /// <summary>A line about the group ("bob left"), shown centered instead of as a bubble.</summary>
@@ -198,7 +234,7 @@ public sealed partial class MessageViewModel : ViewModelBase
     /// <summary>Videos, and images that can't be shown inline: a card with Open and Save.</summary>
     public bool ShowFileCard => IsReady && Image is null && !ImageLoading;
 
-    public string FileLabel => Attachment is { } a ? $"{(a.IsVideo ? "🎬" : "🖼")}  {a.FileName} · {MediaTypes.FormatSize(a.Size)}" : "";
+    public string FileLabel => Attachment is { } a ? $"{(a.IsImage ? "🖼" : a.Icon)}  {a.FileName} · {MediaTypes.FormatSize(a.Size)}" : "";
 
     [RelayCommand] private Task OpenAsync() => _actions?.OpenAttachmentAsync(this) ?? Task.CompletedTask;
     [RelayCommand] private Task SaveAsync() => _actions?.SaveAttachmentAsync(this) ?? Task.CompletedTask;

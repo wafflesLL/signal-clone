@@ -31,15 +31,15 @@ public partial class ShellView : UserControl
         if (_vm is null || TopLevel.GetTopLevel(this)?.StorageProvider is not { CanOpen: true } storage) return;
         var files = await storage.OpenFilePickerAsync(new FilePickerOpenOptions
         {
-            Title = "Send a photo or video",
+            Title = "Send a photo, video or document",
             AllowMultiple = true,
-            FileTypeFilter = [new FilePickerFileType("Photos and videos") { Patterns = MediaTypes.Extensions.Select(x => "*" + x).ToList() }],
+            FileTypeFilter = [new FilePickerFileType("Photos, videos and documents") { Patterns = MediaTypes.Extensions.Select(x => "*" + x).ToList() }],
         });
         foreach (var file in files)
             if (file.TryGetLocalPath() is { } path) await _vm.SendFileAsync(path);
     }
 
-    // Drop photos or videos anywhere on the chat to send them.
+    // Drop files anywhere on the chat to send them.
     private void OnDragOver(object? sender, DragEventArgs e) =>
         e.DragEffects = _vm is { CanCompose: true } && e.DataTransfer.Contains(DataFormat.File) ? DragDropEffects.Copy : DragDropEffects.None;
 

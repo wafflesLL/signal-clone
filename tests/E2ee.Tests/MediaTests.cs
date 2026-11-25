@@ -105,6 +105,45 @@ public sealed class MediaTests : IDisposable
     }
 
     [Fact]
+    public async Task DocumentsCanBeSent()
+    {
+        var alice = await _relay.Register("alice");
+        var bob = await _relay.Register("bob");
+        var pdf = MakeFile("syllabus.pdf", 40_000);
+        await alice.SendFileAsync("bob", pdf, "for thursday");
+        await alice.SendFileAsync("bob", MakeFile("notes.docx", 8_000));
+
+        var got = (await SyncClean(bob)).Received;
+        Assert.Equal(["Document", "Document"], got.Select(m => m.Attachment!.Kind));
+        Assert.Equal("application/pdf", got[0].Attachment!.ContentType);
+        Assert.True(got[1].Attachment!.IsDocument);
+        Assert.Equal(File.ReadAllBytes(pdf), await bob.AttachmentBytesAsync(got[0].Id));
+        Assert.Equal(".pdf", Path.GetExtension(await bob.ExportAttachmentAsync(got[0].Id, Path.Combine(_files, "out"))));
+
+        // Formats that can run code or macros when opened are refused.
+        foreach (var risky in new[] { "old.doc", "budget.xlsm", "page.html", "logo.svg", "bundle.zip", "setup.exe" })
+        {
+            var e = await Assert.ThrowsAsync<MessengerException>(() => alice.SendFileAsync("bob", MakeFile(risky, 100)));
+            Assert.Contains("can't be sent", e.Message);
+        }
+    }
+
+    [Fact]
+    public async Task LongMessagesUpToTheLimit()
+    {
+        var alice = await _relay.Register("alice");
+        var bob = await _relay.Register("bob");
+        // The worst case for size: characters JSON has to escape (6 bytes each). Still fits the relay's limit.
+        var longest = new string('\u0001', Messenger.MaxTextLength);
+        Assert.Equal(MessageStatus.Sent, (await alice.SendAsync("bob", longest)).Status);
+        Assert.Equal(longest, Assert.Single((await SyncClean(bob)).Received).Text);
+
+        var e = await Assert.ThrowsAsync<MessengerException>(() => alice.SendAsync("bob", longest + "!"));
+        Assert.Contains("the limit is 16,000", e.Message);
+        await Assert.ThrowsAsync<MessengerException>(() => alice.SendFileAsync("bob", MakeFile("a.png", 10), longest + "!"));
+    }
+
+    [Fact]
     public async Task TamperedBlobIsDiscarded()
     {
         var alice = await _relay.Register("alice");
@@ -147,7 +186,7 @@ public sealed class MediaTests : IDisposable
         await mallory.SendRawForTestAsync("bob", new MessageContent("text", "watch this", 1, Attachment: pointer));
 
         var result = await bob.SyncAsync();
-        Assert.Contains(result.Problems, p => p.Contains("isn't an image or video"));
+        Assert.Contains(result.Problems, p => p.Contains("doesn't accept"));
         Assert.Null(Assert.Single(result.Received).Attachment);
     }
 

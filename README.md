@@ -7,7 +7,7 @@ public prekey bundles and forwards ciphertext.
 
 Status: milestones 0–5 are done: the protocol, session layer, authenticated relay with push
 delivery, CLI, and a desktop app with safety numbers and key-change warnings, plus
-installable builds. Group chats, photos and videos, and reactions (stretch goals) are done too. Security demos and a
+installable builds. Group chats, photos, videos and documents, and reactions (stretch goals) are done too. Security demos and a
 usability check are next; see
 [docs/STRATEGY.md](docs/STRATEGY.md).
 
@@ -105,10 +105,17 @@ the history). Members can add people but can't remove anyone else.
 
 ![Desktop app: a group chat](docs/screenshots/10-group-chat.png)
 
-**Photos, videos, and reactions.** Click 📎 (or drop files on the chat) to send images or
-videos up to 100 MB; whatever is in the message box becomes the caption. Photos show in the
-chat; videos get *Open* (in your usual player) and *Save* (to Downloads). Click ☺ on any
-message to react; pick the same reaction again to take it back.
+**Photos, videos, documents, and reactions.** Click 📎 (or drop files on the chat) to send
+files up to 100 MB; whatever is in the message box becomes the caption. Photos show in the
+chat; videos and documents get *Open* (in your usual app) and *Save* (to Downloads).
+Documents can be PDF, txt, md, csv, rtf, docx, xlsx, pptx, odt, ods, or odp. Formats that
+can run code or macros when opened (old .doc/.xls/.ppt, .docm, HTML, SVG, ZIP, programs)
+are refused. Click ☺ on any message to react; pick the same reaction again to take it back.
+
+Messages can be up to 16,000 characters (send longer text as a document). Long messages
+show their first few lines with *Show more*.
+
+![Desktop app: a long message and a document](docs/screenshots/13-long-message-and-document.png)
 
 The files are kept on your devices, not the server. Each file is encrypted with a new
 random key before it leaves your computer, and the key travels inside the end-to-end

@@ -57,6 +57,21 @@
       <Setter Property="Background" Value="#26000000" />
       <Setter Property="VerticalAlignment" Value="Center" />
     </Style>
+    <Style Selector="Button.link">
+      <Setter Property="Padding" Value="0,2" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="{DynamicResource LinkBrush}" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing Button.link">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
     <Style Selector="Button.react">
       <Setter Property="Padding" Value="4,0" />
       <Setter Property="MinHeight" Value="0" />
@@ -193,8 +208,9 @@
 
           <Grid DockPanel.Dock="Bottom" ColumnDefinitions="Auto,8,*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
             <Button Name="AttachButton" Content="📎" FontSize="16" Padding="10,4" VerticalAlignment="Bottom" Click="OnAttachClick"
-                    IsEnabled="{Binding !IsUploading}" ToolTip.Tip="Send a photo or video (or drop one here)" />
-            <TextBox Grid.Column="2" Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
+                    IsEnabled="{Binding !IsUploading}" ToolTip.Tip="Send a photo, video or document (or drop files here)" />
+            <TextBox Grid.Column="2" Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap"
+                     MaxLength="16000">
               <TextBox.KeyBindings>
                 <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
               </TextBox.KeyBindings>
@@ -240,7 +256,9 @@
                         <TextBlock FontSize="12" TextWrapping="Wrap" IsVisible="{Binding AttachmentFailed}"
                                    Text="⚠ This attachment couldn't be downloaded (it expired, or was altered on the way)." />
 
-                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" IsVisible="{Binding HasText}" />
+                        <SelectableTextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" IsVisible="{Binding HasText}" />
+                        <Button Name="ShowMoreButton" Classes="link" Content="{Binding ShowMoreText}" Command="{Binding ToggleExpandedCommand}"
+                                IsVisible="{Binding IsLong}" />
 
                         <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,2,0,0">
                           <Border Classes="reactions" IsVisible="{Binding HasReactions}" ToolTip.Tip="{Binding ReactionsTip}">

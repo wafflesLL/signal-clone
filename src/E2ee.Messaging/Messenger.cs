@@ -87,6 +87,18 @@ public sealed class Messenger : IDisposable
     public const int MaxGroupSize = 50; // including you
     public const int MaxGroupNameLength = 64;
 
+    /// <summary>
+    /// Longest message (or caption) that can be sent, in characters. Keeps every encrypted
+    /// message well under the relay's 128 KB limit, even with emoji and escaped characters.
+    /// </summary>
+    public const int MaxTextLength = 16_000;
+
+    private static void CheckText(string text)
+    {
+        if (text.Length > MaxTextLength)
+            throw new MessengerException($"That message is {text.Length:N0} characters; the limit is {MaxTextLength:N0}. Send it as a document instead.");
+    }
+
     private readonly LocalStore _store;
     private readonly RelayClient _relay;
     private readonly FileStream _lock;
@@ -445,6 +457,7 @@ public sealed class Messenger : IDisposable
     public Task<StoredMessage> SendFileAsync(string peer, string path, string caption = "", CancellationToken ct = default) => Locked(async () =>
     {
         CheckDirectPeer(peer);
+        CheckText(caption);
         var media = await UploadAsync(path, [peer], ct);
         return await SendDirectAsync(peer, caption, media, ct);
     });
@@ -459,6 +472,7 @@ public sealed class Messenger : IDisposable
     private async Task<StoredMessage> SendDirectAsync(string peer, string text, PreparedMedia? media, CancellationToken ct)
     {
         CheckDirectPeer(peer);
+        CheckText(text);
 
         // A new session needs a bundle from the relay; fetch it before opening a transaction.
         var bundles = await FetchMissingBundlesAsync([peer], ct);
@@ -642,6 +656,7 @@ public sealed class Messenger : IDisposable
     public Task<StoredMessage> SendGroupAsync(string groupId, string text, CancellationToken ct = default) => Locked(async () =>
     {
         RequireRegistered();
+        CheckText(text);
         var group = ActiveGroup(groupId);
         var id = await FanOutAsync(group.Members, new MessageContent("text", text, 0, new GroupContext(groupId)),
             sentAt => _store.InsertMessage(Username!, true, text, sentAt, MessageStatus.Pending, groupId), ct);
@@ -652,6 +667,7 @@ public sealed class Messenger : IDisposable
     public Task<StoredMessage> SendGroupFileAsync(string groupId, string path, string caption = "", CancellationToken ct = default) => Locked(async () =>
     {
         RequireRegistered();
+        CheckText(caption);
         var group = ActiveGroup(groupId);
         if (group.Members.Count == 0) throw new MessengerException("No one else is in this group.");
         if (group.Members.FirstOrDefault(m => _store.GetContact(m) is { IdentityChanged: true }) is { } flagged)
@@ -813,7 +829,7 @@ public sealed class Messenger : IDisposable
         var info = new FileInfo(path);
         if (!info.Exists) throw new MessengerException($"File not found: {path}");
         var type = MediaTypes.ForFileName(info.Name)
-            ?? throw new MessengerException("Only images and videos can be sent (jpg, png, gif, webp, heic, mp4, mov, webm and similar).");
+            ?? throw new MessengerException($"That kind of file can't be sent. You can send {MediaTypes.Accepted}.");
         if (info.Length == 0) throw new MessengerException("That file is empty.");
         if (info.Length > Attachments.MaxPlaintextBytes)
             throw new MessengerException($"That file is {MediaTypes.FormatSize(info.Length)}; the limit is {MediaTypes.FormatSize(Attachments.MaxPlaintextBytes)}.");
@@ -837,7 +853,7 @@ public sealed class Messenger : IDisposable
         // The type comes from our own list, never from what the sender claimed.
         if (MediaTypes.ForFileName(name) is not { } type || !Attachments.IsValidId(p.Id) || p.Key?.Length != 32
             || p.Digest?.Length != 32 || p.Size is <= 0 or > Attachments.MaxPlaintextBytes)
-            return $"{sender} sent an attachment that isn't an image or video this app accepts; it was ignored.";
+            return $"{sender} sent a kind of file this app doesn't accept; it was ignored.";
         _store.PutAttachment(messageId, p with { FileName = name, ContentType = type }, AttachmentState.Downloading, null);
         return null;
     }

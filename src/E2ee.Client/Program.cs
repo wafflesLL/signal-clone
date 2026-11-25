@@ -30,8 +30,8 @@ const string Usage = """
       history <#group> [n]            show the group's last n messages
       chat <#group>                   interactive group chat
 
-    photos, videos and reactions (<chat> is a username or #group; n counts back from the newest message):
-      send-file <chat> <path> [caption...]   send an image or video (up to 100 MB)
+    photos, videos, documents and reactions (<chat> is a username or #group; n counts back from the newest message):
+      send-file <chat> <path> [caption...]   send a photo, video or document (up to 100 MB)
       react <chat> <emoji|none> [n]          react to the nth newest message (default 1); none takes it back
       save <chat> [n] [dir]                  save the nth newest attachment (default: newest, to ~/Downloads)
 
@@ -255,7 +255,7 @@ static string Format(StoredMessage msg, Messenger? m)
     var flag = msg.Status switch { MessageStatus.Pending => " (pending)", MessageStatus.Failed => " (failed)", _ => "" };
     if (msg.IsEvent) return $"[{msg.SentAt.ToLocalTime():HH:mm}] {where}* {msg.Text}";
     var file = msg.Attachment is { } a
-        ? $"[{(a.IsVideo ? "video" : "image")}: {a.FileName}, {MediaTypes.FormatSize(a.Size)}{a.State switch { AttachmentState.Downloading => ", downloading", AttachmentState.Failed => ", failed", _ => "" }}] "
+        ? $"[{a.Kind.ToLowerInvariant()}: {a.FileName}, {MediaTypes.FormatSize(a.Size)}{a.State switch { AttachmentState.Downloading => ", downloading", AttachmentState.Failed => ", failed", _ => "" }}] "
         : "";
     var reactions = msg.Reactions.Count > 0 ? "  (" + string.Join(", ", msg.Reactions.Select(r => $"{r.Emoji} {r.Reactor}")) + ")" : "";
     return $"[{msg.SentAt.ToLocalTime():HH:mm}] {where}{(msg.Outgoing ? "me" : msg.Peer)}: {(file + msg.Text).TrimEnd()}{flag}{reactions}";

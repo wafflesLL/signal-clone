@@ -18,9 +18,11 @@
       <ResourceDictionary.ThemeDictionaries>
         <ResourceDictionary x:Key="Light">
           <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#E9E9EB" />
+          <SolidColorBrush x:Key="LinkBrush" Color="#1558B0" />
         </ResourceDictionary>
         <ResourceDictionary x:Key="Dark">
           <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#3A3A3C" />
+          <SolidColorBrush x:Key="LinkBrush" Color="#64B5F6" />
         </ResourceDictionary>
       </ResourceDictionary.ThemeDictionaries>
     </ResourceDictionary>
