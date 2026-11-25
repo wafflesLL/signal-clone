@@ -7,7 +7,7 @@ namespace E2ee.App.ViewModels;
 
 /// <summary>The main screen: contact list on the left, the open conversation on the right.
 /// Every action goes through <see cref="Messenger"/>; nothing here touches crypto.</summary>
-public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase, IDisposable
+public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase, IDisposable, IMessageActions
 {
     /// <summary>How long one push wait may stay open on the relay.</summary>
     public static readonly TimeSpan PushWait = TimeSpan.FromSeconds(20);
@@ -144,9 +144,111 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     private void AddMessage(StoredMessage m)
     {
-        var vm = new MessageViewModel(m);
+        var vm = new MessageViewModel(m, this);
         if (vm.ShowSender) vm.SetSenderSlot(SlotFor(m.Peer));
         Messages.Add(vm);
+        _ = LoadImageAsync(vm);
+    }
+
+    /// <summary>Decrypts and decodes an image attachment for the bubble. Videos and undecodable images get a file card.</summary>
+    private async Task LoadImageAsync(MessageViewModel vm)
+    {
+        if (vm is not { IsReady: true, Attachment.IsImage: true } || vm.Image is not null || vm.ImageLoading) return;
+        vm.ImageLoading = true;
+        try
+        {
+            var bytes = await messenger.AttachmentBytesAsync(vm.Id);
+            vm.Image = await Task.Run(() =>
+            {
+                try
+                {
+                    var full = new Avalonia.Media.Imaging.Bitmap(new MemoryStream(bytes));
+                    if (full.PixelSize.Width <= 1024) return full;
+                    full.Dispose();
+                    return Avalonia.Media.Imaging.Bitmap.DecodeToWidth(new MemoryStream(bytes), 1024);
+                }
+                catch (Exception) { return null; } // e.g. HEIC on a platform without a decoder
+            });
+        }
+        catch (MessengerException) { }
+        finally { vm.ImageLoading = false; }
+    }
+
+    // ---------------------------------------------------------------- attachments and reactions
+
+    /// <summary>Opens a file in the system's default app. Replaceable for tests.</summary>
+    public Action<string> OpenFile { get; set; } = path =>
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo(path) { UseShellExecute = true });
+
+    /// <summary>Where Save puts attachments.</summary>
+    public string DownloadsFolder { get; set; } =
+        Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+
+    /// <summary>True while a photo or video is being encrypted and uploaded.</summary>
+    [ObservableProperty] private bool _isUploading;
+
+    /// <summary>Sends an image or video to the open chat, with the draft as its caption.</summary>
+    public async Task SendFileAsync(string path)
+    {
+        if (Selected is not { } peer || !CanCompose || IsUploading) return;
+        var caption = Draft.Trim();
+        Draft = "";
+        IsUploading = true;
+        try
+        {
+            var msg = peer.IsGroup
+                ? await messenger.SendGroupFileAsync(peer.GroupId!, path, caption)
+                : await messenger.SendFileAsync(peer.Username, path, caption);
+            if (Selected == peer) AddMessage(msg);
+            peer.Update(msg);
+            MoveToTop(peer);
+            RelayOnline = msg.Status != MessageStatus.Pending;
+        }
+        catch (IdentityChangedException e)
+        {
+            MarkIdentityChanged(e.Username);
+            if (peer.IsGroup) Notice = $"{e.Username}'s safety number changed, so nothing was sent. Review it in your chat with {e.Username} first.";
+            Draft = caption;
+        }
+        catch (RelayException e) when (e.Status is null)
+        {
+            RelayOnline = false;
+            Notice = "Can't reach the relay to upload that. Try again when it's back.";
+            Draft = caption;
+        }
+        catch (Exception e) when (e is MessengerException or RelayException or IOException or UnauthorizedAccessException)
+        {
+            Notice = e.Message;
+            Draft = caption;
+        }
+        finally
+        {
+            IsUploading = false;
+        }
+    }
+
+    async Task IMessageActions.ReactAsync(MessageViewModel message, string? emoji)
+    {
+        try { message.Update(await messenger.ReactAsync(message.Id, emoji)); }
+        catch (IdentityChangedException e) { MarkIdentityChanged(e.Username); Notice = e.Message; }
+        catch (RelayException e) when (e.Status is null) { RelayOnline = false; Notice = "Can't reach the relay to send that reaction."; }
+        catch (Exception e) when (e is MessengerException or RelayException) { Notice = e.Message; }
+    }
+
+    async Task IMessageActions.OpenAttachmentAsync(MessageViewModel message)
+    {
+        try { OpenFile(await messenger.ExportAttachmentAsync(message.Id, messenger.OpenFolder)); }
+        catch (Exception e) when (e is MessengerException or IOException or System.ComponentModel.Win32Exception) { Notice = $"Couldn't open it: {e.Message}"; }
+    }
+
+    async Task IMessageActions.SaveAttachmentAsync(MessageViewModel message)
+    {
+        try
+        {
+            var path = await messenger.ExportAttachmentAsync(message.Id, DownloadsFolder);
+            Notice = $"Saved to {Path.GetFileName(DownloadsFolder)} as {Path.GetFileName(path)}.";
+        }
+        catch (Exception e) when (e is MessengerException or IOException or UnauthorizedAccessException) { Notice = $"Couldn't save it: {e.Message}"; }
     }
 
     /// <summary>Light and dark mode use different palettes.</summary>
@@ -435,6 +537,12 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
                 MoveToTop(contact);
                 if (Selected == contact) AddMessage(msg);
                 else contact.Unread++;
+            }
+            foreach (var changed in result.Updated)
+            {
+                if (Messages.FirstOrDefault(m => m.Id == changed.Id) is not { } shown) continue;
+                shown.Update(changed);
+                _ = LoadImageAsync(shown);
             }
             foreach (var user in result.IdentityChanges) MarkIdentityChanged(user);
             var problems = result.Problems.Where(p => !result.IdentityChanges.Any(u => p.StartsWith(u + "'s safety number"))).ToList();

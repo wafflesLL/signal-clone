@@ -14,8 +14,13 @@ public enum MessageStatus { Pending, Sent, Received, Failed }
 /// <param name="Peer">The other person in a direct chat. In a group chat, who sent it (you, for outgoing).</param>
 /// <param name="GroupId">Set for messages in a group chat.</param>
 /// <param name="IsEvent">A line about the group itself ("bob left") rather than something someone wrote.</param>
+/// <param name="Attachment">An image or video, if the message carries one (Text is then its caption).</param>
+/// <param name="Reactions">Who reacted with what. Empty when nobody has.</param>
 public sealed record StoredMessage(long Id, string Peer, bool Outgoing, string Text, DateTimeOffset SentAt, MessageStatus Status,
-    string? GroupId = null, bool IsEvent = false);
+    string? GroupId = null, bool IsEvent = false, Attachment? Attachment = null, IReadOnlyList<Reaction>? Reactions = null)
+{
+    public IReadOnlyList<Reaction> Reactions { get; init; } = Reactions ?? [];
+}
 
 /// <summary>A group chat as this device knows it. Members are everyone else in it, not you.</summary>
 /// <param name="Active">False after you left; the history stays.</param>
@@ -45,9 +50,13 @@ internal sealed class LocalStore : IDisposable
     private readonly StateCipher _cipher;
     private SqliteTransaction? _tx;
 
+    private readonly string _mediaDir;
+
     public LocalStore(string dbPath, byte[] masterKey)
     {
         _cipher = new StateCipher(masterKey);
+        _mediaDir = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(dbPath))!, "media");
+        Directory.CreateDirectory(_mediaDir);
         _c = new SqliteConnection(new SqliteConnectionStringBuilder { DataSource = dbPath, Pooling = false }.ToString());
         _c.Open();
         Exec("""
@@ -72,6 +81,10 @@ internal sealed class LocalStore : IDisposable
             CREATE TABLE IF NOT EXISTS group_members (group_id TEXT NOT NULL, username TEXT NOT NULL, PRIMARY KEY (group_id, username));
             CREATE TABLE IF NOT EXISTS group_outbox (
                 message_id INTEGER NOT NULL, peer TEXT NOT NULL, envelope BLOB NOT NULL, PRIMARY KEY (message_id, peer));
+            CREATE TABLE IF NOT EXISTS attachments (
+                message_id INTEGER PRIMARY KEY, pointer BLOB NOT NULL, state TEXT NOT NULL, file TEXT);
+            CREATE TABLE IF NOT EXISTS reactions (
+                message_id INTEGER NOT NULL, reactor TEXT NOT NULL, emoji TEXT NOT NULL, PRIMARY KEY (message_id, reactor));
             """);
         Migrate();
     }
@@ -258,14 +271,15 @@ internal sealed class LocalStore : IDisposable
     public void DeleteSessions(string peer) => Exec("DELETE FROM sessions WHERE peer = $p", ("$p", peer));
 
     // ------------------------------------------------------------ messages
+    /// <param name="kind">"text", "event" (a line about a group) or "control" (never shown; carries a reaction's delivery).</param>
     public long InsertMessage(string peer, bool outgoing, string text, DateTimeOffset sentAt, MessageStatus status,
-        string? groupId = null, bool isEvent = false)
+        string? groupId = null, bool isEvent = false, string? kind = null)
     {
         using var cmd = Cmd("""
             INSERT INTO messages (peer, outgoing, body, sent_at, status, group_id, kind)
             VALUES ($p, $o, x'', $t, $s, $g, $k) RETURNING id
             """, ("$p", peer), ("$o", outgoing ? 1 : 0), ("$t", Ms(sentAt)), ("$s", status.ToString()), ("$g", groupId),
-            ("$k", isEvent ? "event" : "text"));
+            ("$k", kind ?? (isEvent ? "event" : "text")));
         var id = (long)cmd.ExecuteScalar()!;
         Exec("UPDATE messages SET body = $b WHERE id = $i", ("$b", _cipher.Seal(Encoding.UTF8.GetBytes(text), $"message|{id}")), ("$i", id));
         return id;
@@ -286,10 +300,41 @@ internal sealed class LocalStore : IDisposable
 
     public StoredMessage GetMessage(long id)
     {
-        using var cmd = Cmd($"SELECT {MessageColumns} FROM messages WHERE id = $i", ("$i", id));
-        using var r = cmd.ExecuteReader();
-        r.Read();
-        return ReadMessage(r);
+        StoredMessage m;
+        using (var cmd = Cmd($"SELECT {MessageColumns} FROM messages WHERE id = $i", ("$i", id)))
+        using (var r = cmd.ExecuteReader())
+        {
+            if (!r.Read()) throw new MessengerException("No such message.");
+            m = ReadMessage(r);
+        }
+        return WithExtras(m);
+    }
+
+    /// <summary>Adds the attachment and reactions, which live in their own tables.</summary>
+    private StoredMessage WithExtras(StoredMessage m)
+    {
+        Attachment? attachment = null;
+        if (GetAttachment(m.Id) is { } a)
+            attachment = new Attachment(a.Pointer.FileName, a.Pointer.ContentType, a.Pointer.Size, a.State);
+        var reactions = new List<Reaction>();
+        using (var cmd = Cmd("SELECT reactor, emoji FROM reactions WHERE message_id = $i ORDER BY rowid", ("$i", m.Id)))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) reactions.Add(new Reaction(r.GetString(0), r.GetString(1)));
+        return m with { Attachment = attachment, Reactions = reactions };
+    }
+
+    /// <summary>
+    /// The message a reaction points at: written by <paramref name="author"/> at <paramref name="sentAtMs"/>,
+    /// in the group, or else in the direct chat with <paramref name="chatPeer"/>.
+    /// </summary>
+    public long? FindMessage(string? groupId, string chatPeer, string author, bool authorIsMe, long sentAtMs)
+    {
+        using var cmd = groupId is not null
+            ? Cmd("SELECT id FROM messages WHERE group_id = $g AND peer = $a AND sent_at = $t AND kind = 'text' LIMIT 1",
+                ("$g", groupId), ("$a", author), ("$t", sentAtMs))
+            : Cmd("SELECT id FROM messages WHERE group_id IS NULL AND peer = $p AND outgoing = $o AND sent_at = $t AND kind = 'text' LIMIT 1",
+                ("$p", chatPeer), ("$o", authorIsMe ? 1 : 0), ("$t", sentAtMs));
+        return cmd.ExecuteScalar() is long id ? id : null;
     }
 
     /// <summary>The newest <paramref name="limit"/> messages in the direct chat with the peer, oldest first.</summary>
@@ -300,12 +345,62 @@ internal sealed class LocalStore : IDisposable
 
     private List<StoredMessage> ReadMessages(string where, string key, int limit)
     {
-        using var cmd = Cmd($"SELECT * FROM (SELECT {MessageColumns} FROM messages WHERE {where} ORDER BY id DESC LIMIT $n) ORDER BY id",
-            ("$p", key), ("$n", limit));
-        using var r = cmd.ExecuteReader();
         var list = new List<StoredMessage>();
-        while (r.Read()) list.Add(ReadMessage(r));
+        using (var cmd = Cmd($"""
+                   SELECT * FROM (SELECT {MessageColumns} FROM messages WHERE {where} AND kind != 'control' ORDER BY id DESC LIMIT $n)
+                   ORDER BY id
+                   """, ("$p", key), ("$n", limit)))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) list.Add(ReadMessage(r));
+        return list.Select(WithExtras).ToList();
+    }
+
+    // ------------------------------------------------------------ attachments and reactions
+    public void PutAttachment(long messageId, AttachmentPointer pointer, AttachmentState state, string? file) =>
+        Exec("INSERT OR REPLACE INTO attachments VALUES ($i, $p, $s, $f)", ("$i", messageId),
+            ("$p", _cipher.Seal(JsonSerializer.SerializeToUtf8Bytes(pointer, WireJson.Options), $"attachment|{messageId}")),
+            ("$s", state.ToString()), ("$f", file));
+
+    public void SetAttachmentState(long messageId, AttachmentState state, string? file) =>
+        Exec("UPDATE attachments SET state = $s, file = $f WHERE message_id = $i", ("$s", state.ToString()), ("$f", file), ("$i", messageId));
+
+    public (AttachmentPointer Pointer, AttachmentState State, string? File)? GetAttachment(long messageId)
+    {
+        using var cmd = Cmd("SELECT pointer, state, file FROM attachments WHERE message_id = $i", ("$i", messageId));
+        using var r = cmd.ExecuteReader();
+        if (!r.Read()) return null;
+        var pointer = JsonSerializer.Deserialize<AttachmentPointer>(_cipher.Open((byte[])r[0], $"attachment|{messageId}"), WireJson.Options)!;
+        return (pointer, Enum.Parse<AttachmentState>(r.GetString(1)), r.IsDBNull(2) ? null : r.GetString(2));
+    }
+
+    public List<long> AttachmentsToDownload()
+    {
+        using var cmd = Cmd("SELECT message_id FROM attachments WHERE state = $s ORDER BY message_id", ("$s", nameof(AttachmentState.Downloading)));
+        using var r = cmd.ExecuteReader();
+        var list = new List<long>();
+        while (r.Read()) list.Add(r.GetInt64(0));
         return list;
+    }
+
+    /// <summary>Saves a file in the profile's media folder, encrypted under the master key. Returns its name.</summary>
+    public string WriteMedia(byte[] plaintext)
+    {
+        var name = Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
+        var tmp = Path.Combine(_mediaDir, name + ".tmp");
+        File.WriteAllBytes(tmp, _cipher.Seal(plaintext, $"media|{name}"));
+        File.Move(tmp, Path.Combine(_mediaDir, name));
+        return name;
+    }
+
+    public byte[] ReadMedia(string name) => _cipher.Open(File.ReadAllBytes(Path.Combine(_mediaDir, name)), $"media|{name}");
+
+    public void DeleteMedia(string name) => File.Delete(Path.Combine(_mediaDir, name));
+
+    /// <summary>Sets (or with null, removes) one person's reaction to a message.</summary>
+    public void SetReaction(long messageId, string reactor, string? emoji)
+    {
+        if (emoji is null) Exec("DELETE FROM reactions WHERE message_id = $i AND reactor = $r", ("$i", messageId), ("$r", reactor));
+        else Exec("INSERT OR REPLACE INTO reactions VALUES ($i, $r, $e)", ("$i", messageId), ("$r", reactor), ("$e", emoji));
     }
 
     // ------------------------------------------------------------ outbox

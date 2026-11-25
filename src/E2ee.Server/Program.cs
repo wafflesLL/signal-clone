@@ -24,15 +24,15 @@ const int MaxPrekeysPerUpload = 200;
 static IResult Error(int status, string message) => Results.Json(new ErrorResponse(message), WireJson.Options, statusCode: status);
 static IResult Json(object value) => Results.Json(value, WireJson.Options);
 
-static async Task<byte[]?> ReadBody(HttpRequest req)
+static async Task<byte[]?> ReadBody(HttpRequest req, long max)
 {
-    if (req.ContentLength > MaxBodyBytes) return null;
+    if (req.ContentLength > max) return null;
     using var ms = new MemoryStream();
-    var buffer = new byte[16 * 1024];
+    var buffer = new byte[64 * 1024];
     int n;
     while ((n = await req.Body.ReadAsync(buffer)) > 0)
     {
-        if (ms.Length + n > MaxBodyBytes) return null;
+        if (ms.Length + n > max) return null;
         ms.Write(buffer, 0, n);
     }
     return ms.ToArray();
@@ -47,9 +47,9 @@ static T? Parse<T>(byte[] body) where T : class
 // Verifies the request signature. With sigPubOverride (registration only) the key comes
 // from the request body, which proves possession; otherwise from the account.
 static async Task<(string? User, byte[] Body, IResult? Error)> Authenticate(
-    HttpContext ctx, RelayStore store, ReplayGuard replay, Func<byte[], (string User, byte[] SigPub)?>? fromBody = null)
+    HttpContext ctx, RelayStore store, ReplayGuard replay, Func<byte[], (string User, byte[] SigPub)?>? fromBody = null, long maxBody = MaxBodyBytes)
 {
-    var body = await ReadBody(ctx.Request);
+    var body = await ReadBody(ctx.Request, maxBody);
     if (body is null) return (null, [], Error(413, "request too large"));
     var h = ctx.Request.Headers;
     string user = h[RelayAuth.UserHeader].ToString();
@@ -190,6 +190,40 @@ app.MapPost("/v1/messages/ack", async (HttpContext ctx, RelayStore store, Replay
     if (Parse<AckRequest>(body) is not { Ids: not null } ack || ack.Ids.Count > 1000) return Error(400, "malformed ack");
     store.Ack(user!, ack.Ids);
     return Json(new { ok = true });
+});
+
+// Attachments: the client encrypts the file with a fresh key (sent to recipients inside the
+// end-to-end encrypted message) and parks only the ciphertext here, naming who may fetch it.
+// The blob is deleted once every recipient acknowledges it, or after the retention period;
+// the copies people keep live on their own devices.
+app.MapPost("/v1/attachments", async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+{
+    if (ctx.Features.Get<Microsoft.AspNetCore.Http.Features.IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } limit)
+        limit.MaxRequestBodySize = Attachments.MaxCiphertextBytes;
+    var (user, body, error) = await Authenticate(ctx, store, replay, maxBody: Attachments.MaxCiphertextBytes);
+    if (error is not null) return error;
+    var to = ctx.Request.Query["to"].ToString().Split(',', StringSplitOptions.RemoveEmptyEntries).Distinct().ToList();
+    if (to.Count is 0 or > 100 || !to.All(Usernames.IsValid)) return Error(400, "name 1-100 recipients in ?to=");
+    if (to.FirstOrDefault(u => store.GetIdentity(u) is null) is { } unknown) return Error(404, $"unknown user {unknown}");
+    if (body.Length < 28) return Error(400, "empty attachment");
+    return Json(new AttachmentUploadResponse(store.PutAttachment(user!, to, body)));
+});
+
+app.MapGet("/v1/attachments/{id}", async (string id, HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+{
+    var (user, _, error) = await Authenticate(ctx, store, replay);
+    if (error is not null) return error;
+    if (!Attachments.IsValidId(id)) return Error(400, "bad attachment id");
+    return store.GetAttachment(user!, id) is { } blob
+        ? Results.Bytes(blob, "application/octet-stream")
+        : Error(404, "no such attachment for you (it may have expired)");
+});
+
+app.MapPost("/v1/attachments/{id}/ack", async (string id, HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+{
+    var (user, _, error) = await Authenticate(ctx, store, replay);
+    if (error is not null) return error;
+    return Attachments.IsValidId(id) && store.AckAttachment(user!, id) ? Json(new { ok = true }) : Error(404, "no such attachment for you");
 });
 
 app.Run();

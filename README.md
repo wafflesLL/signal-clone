@@ -7,7 +7,7 @@ public prekey bundles and forwards ciphertext.
 
 Status: milestones 0–5 are done: the protocol, session layer, authenticated relay with push
 delivery, CLI, and a desktop app with safety numbers and key-change warnings, plus
-installable builds. Group chats (a stretch goal) are done too. Security demos and a
+installable builds. Group chats, photos and videos, and reactions (stretch goals) are done too. Security demos and a
 usability check are next; see
 [docs/STRATEGY.md](docs/STRATEGY.md).
 
@@ -29,7 +29,8 @@ src/
     SafetyNumber.cs   60-digit safety numbers for checking identities out of band
     Wire.cs           relay JSON format and request signing (shared with the server)
   E2ee.Messaging/     session layer shared by app and CLI
-    Messenger.cs      identity, prekeys, contacts, sessions, send/sync
+    Messenger.cs      identity, prekeys, contacts, sessions, groups, media, reactions, send/sync
+    Media.cs          attachment and reaction types; which file types are accepted
     LocalStore.cs     encrypted local SQLite database
     MasterKeyStore.cs master key in macOS Keychain / Windows DPAPI / key file
     RelayClient.cs    signed HTTP client for the relay
@@ -44,6 +45,7 @@ tests/
     RelayAuthTests.cs    signed requests: wrong key, stale, replayed, wrong path
     SafetyNumberTests.cs safety numbers, checked against scripts/safety_number_crosscheck.py
     GroupTests.cs        group chats: fan-out, adding, leaving, non-members refused
+    MediaTests.cs        photos, videos, reactions; tampered and disguised files refused
     AppTests.cs          desktop app, rendered headlessly, against an in-process relay
   vectors/               deterministic protocol vectors we generate
 docs/STRATEGY.md         plan, milestones, evaluation, roles
@@ -103,6 +105,19 @@ the history). Members can add people but can't remove anyone else.
 
 ![Desktop app: a group chat](docs/screenshots/10-group-chat.png)
 
+**Photos, videos, and reactions.** Click 📎 (or drop files on the chat) to send images or
+videos up to 100 MB; whatever is in the message box becomes the caption. Photos show in the
+chat; videos get *Open* (in your usual player) and *Save* (to Downloads). Click ☺ on any
+message to react; pick the same reaction again to take it back.
+
+The files are kept on your devices, not the server. Each file is encrypted with a new
+random key before it leaves your computer, and the key travels inside the end-to-end
+encrypted message. The relay holds only the ciphertext, only for the people you sent it
+to, and deletes it as soon as they all have it (or after 14 days). Each recipient checks
+it wasn't altered, decrypts it, and keeps it in their profile's encrypted `media` folder.
+
+![Desktop app: photos, videos, and reactions](docs/screenshots/12-photos-and-reactions.png)
+
 ### Command line
 
 Each person uses their own profile. On one machine, two profiles stand in for two people.
@@ -136,16 +151,26 @@ dotnet run --project src/E2ee.Client -- --profile alice group-create Study bob,c
 dotnet run --project src/E2ee.Client -- --profile bob chat "#Study"
 ```
 
+Photos, videos, and reactions work from the command line too:
+
+```bash
+dotnet run --project src/E2ee.Client -- --profile alice send-file bob ~/Pictures/cat.jpg look
+```
+
+```bash
+dotnet run --project src/E2ee.Client -- --profile bob react alice 👍
+```
+
 Other commands: `send`, `sync`, `history`, `add`, `contacts`, `safety`, `verify`, `trust`,
-`groups`, `group-add`, `group-leave`, `whoami` (see `--help`). `send` and `history` also
-take a `#group`.
+`groups`, `group-add`, `group-leave`, `save`, `whoami` (see `--help`). `send`, `history`,
+`send-file`, `react`, and `save` also take a `#group`.
 
 Profiles live in `~/Library/Application Support/E2ee/<profile>` on macOS (`%LOCALAPPDATA%\E2ee`
 on Windows, `~/.local/share/E2ee` on Linux). Private keys, sessions, and message history are
 encrypted with a per-profile master key kept in the macOS Keychain or Windows DPAPI; pass
 `--key-file` to keep it in a file in the profile instead. The relay writes `relay.sqlite3`
 (override with the `E2EE_DB` environment variable) and only ever holds public keys and
-ciphertext.
+ciphertext; attachments in transit sit in `relay-attachments/` next to it.
 
 Screenshots in `docs/screenshots/` come from the UI tests. Regenerate them with
 `E2EE_SCREENSHOTS=docs/screenshots dotnet test`.

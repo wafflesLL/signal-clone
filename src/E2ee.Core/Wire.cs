@@ -40,6 +40,23 @@ public sealed record WaitResponse(bool Pending);
 
 public sealed record ErrorResponse(string Error);
 
+/// <summary>An encrypted attachment parked on the relay until its recipients fetch it.</summary>
+public sealed record AttachmentUploadResponse(string Id);
+
+public static class Attachments
+{
+    /// <summary>Largest file that can be sent, before encryption.</summary>
+    public const long MaxPlaintextBytes = 100L * 1024 * 1024;
+
+    /// <summary>AES-GCM adds a 12-byte nonce and a 16-byte tag.</summary>
+    public const long MaxCiphertextBytes = MaxPlaintextBytes + 28;
+
+    /// <summary>How long the relay keeps an attachment nobody has fetched.</summary>
+    public static readonly TimeSpan Retention = TimeSpan.FromDays(14);
+
+    public static bool IsValidId(string? id) => id is { Length: 32 } && id.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+}
+
 public static class WireJson
 {
     public static readonly JsonSerializerOptions Options = new(JsonSerializerDefaults.Web)

@@ -10,6 +10,7 @@ dist/
 *-wal
 *-shm
 state/
+relay-attachments/
 # LaTeX build output
 report/*.aux
 report/*.log

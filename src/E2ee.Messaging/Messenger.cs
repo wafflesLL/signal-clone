@@ -47,7 +47,12 @@ public sealed record Conversation(Contact? Contact, Group? Group, StoredMessage?
 public sealed record IdentityCheck(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, string SafetyNumber, bool MatchesTrustedKey);
 
 /// <param name="IdentityChanges">Contacts whose safety number changed during this sync.</param>
-public sealed record SyncResult(IReadOnlyList<StoredMessage> Received, IReadOnlyList<string> Problems, IReadOnlyList<string> IdentityChanges);
+/// <param name="Updated">Messages already shown that changed: an attachment finished downloading, or someone reacted.</param>
+public sealed record SyncResult(IReadOnlyList<StoredMessage> Received, IReadOnlyList<string> Problems, IReadOnlyList<string> IdentityChanges,
+    IReadOnlyList<StoredMessage>? Updated = null)
+{
+    public IReadOnlyList<StoredMessage> Updated { get; init; } = Updated ?? [];
+}
 
 public class MessengerException(string message) : Exception(message);
 public sealed class NoRelayConfiguredException() : MessengerException("No relay URL given and none saved in this profile. Register first.");
@@ -66,7 +71,11 @@ public sealed class IdentityChangedException(string user) : MessengerException(
 /// and full member list, sent when it is created or someone is added) or "group_leave".
 /// Group is set for anything that belongs to a group chat.
 /// </summary>
-internal sealed record MessageContent(string Type, string Body, long SentAt, GroupContext? Group = null);
+internal sealed record MessageContent(string Type, string Body, long SentAt, GroupContext? Group = null,
+    AttachmentPointer? Attachment = null, ReactionContent? Reaction = null);
+
+/// <summary>A reaction (or, with a null Emoji, taking one back) to the message <paramref name="Author"/> sent at <paramref name="SentAt"/>.</summary>
+internal sealed record ReactionContent(string Author, long SentAt, string? Emoji);
 
 /// <param name="Members">Everyone in the group, sender included. Only in group_update.</param>
 internal sealed record GroupContext(string Id, string? Name = null, List<string>? Members = null);
@@ -85,6 +94,7 @@ public sealed class Messenger : IDisposable
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly bool _ownsHttp;
     private readonly HttpClient _http;
+    private readonly string _dataDir;
     private IdentityKeys? _identity;
     private DateTimeOffset _lastPrekeyCheck = DateTimeOffset.MinValue;
     private long _lastSeenInboxId; // highest relay inbox id fetched; held messages stay below it
@@ -96,6 +106,7 @@ public sealed class Messenger : IDisposable
     private Messenger(LocalStore store, RelayClient relay, HttpClient http, bool ownsHttp, FileStream lockFile, PrekeyPolicy policy)
     {
         (_store, _relay, _http, _ownsHttp, _lock, _policy) = (store, relay, http, ownsHttp, lockFile, policy);
+        _dataDir = Path.GetDirectoryName(lockFile.Name)!;
     }
 
     public static Messenger Open(MessengerOptions o)
@@ -116,8 +127,8 @@ public sealed class Messenger : IDisposable
             if (saved is not null && requested is not null && Normalize(saved) != Normalize(requested))
                 throw new MessengerException($"This profile is registered on {saved}, not {requested}.");
             var server = requested ?? saved ?? throw new NoRelayConfiguredException();
-            // Long enough for a push wait (RelayClient.MaxWaitSeconds) plus slack.
-            var http = o.HttpClient ?? new HttpClient { BaseAddress = Normalize(server), Timeout = TimeSpan.FromSeconds(45) };
+            // RelayClient sets a timeout per request (longer for attachments), so none here.
+            var http = o.HttpClient ?? new HttpClient { BaseAddress = Normalize(server), Timeout = Timeout.InfiniteTimeSpan };
 
             var m = new Messenger(store, new RelayClient(http), http, o.HttpClient is null, lockFile, o.Prekeys);
             m.LoadIdentity();
@@ -153,6 +164,7 @@ public sealed class Messenger : IDisposable
         _gate.Wait();
         _store.Dispose();
         if (_ownsHttp) _http.Dispose();
+        try { if (Directory.Exists(OpenFolder)) Directory.Delete(OpenFolder, recursive: true); } catch (IOException) { }
         _lock.Dispose();
         _gate.Dispose();
     }
@@ -423,11 +435,30 @@ public sealed class Messenger : IDisposable
     /// Encrypts and queues a message, then tries to deliver it. If the relay is down the
     /// message stays Pending and the same ciphertext is retried on the next sync.
     /// </summary>
-    public Task<StoredMessage> SendAsync(string peer, string text, CancellationToken ct = default) => Locked(async () =>
+    public Task<StoredMessage> SendAsync(string peer, string text, CancellationToken ct = default) =>
+        Locked(() => SendDirectAsync(peer, text, null, ct));
+
+    /// <summary>
+    /// Sends an image or video (with an optional caption). The file is encrypted with a fresh
+    /// key and parked on the relay for the recipient; the key goes in the message.
+    /// </summary>
+    public Task<StoredMessage> SendFileAsync(string peer, string path, string caption = "", CancellationToken ct = default) => Locked(async () =>
+    {
+        CheckDirectPeer(peer);
+        var media = await UploadAsync(path, [peer], ct);
+        return await SendDirectAsync(peer, caption, media, ct);
+    });
+
+    private void CheckDirectPeer(string peer)
     {
         RequireRegistered();
         if (peer == Username) throw new MessengerException("You can't message yourself.");
         if (_store.GetContact(peer) is { IdentityChanged: true }) throw new IdentityChangedException(peer);
+    }
+
+    private async Task<StoredMessage> SendDirectAsync(string peer, string text, PreparedMedia? media, CancellationToken ct)
+    {
+        CheckDirectPeer(peer);
 
         // A new session needs a bundle from the relay; fetch it before opening a transaction.
         var bundles = await FetchMissingBundlesAsync([peer], ct);
@@ -437,8 +468,10 @@ public sealed class Messenger : IDisposable
         using (var tx = _store.Begin())
         {
             var sentAt = Now;
-            env = EncryptOrFlag(tx, peer, bundles.GetValueOrDefault(peer), Serialize(new MessageContent("text", text, sentAt.ToUnixTimeMilliseconds())));
+            var content = new MessageContent("text", text, sentAt.ToUnixTimeMilliseconds(), Attachment: media?.Pointer);
+            env = EncryptOrFlag(tx, peer, bundles.GetValueOrDefault(peer), Serialize(content));
             messageId = _store.InsertMessage(peer, true, text, sentAt, MessageStatus.Pending);
+            if (media is not null) KeepOwnCopy(messageId, media);
             _store.PutOutbox(messageId, peer, env);
             tx.Commit();
         }
@@ -446,7 +479,7 @@ public sealed class Messenger : IDisposable
         try { await DeliverAsync(messageId, peer, env, ct); }
         catch (RelayException e) when (e.Status is null) { /* stays pending; retried on sync */ }
         return _store.GetMessage(messageId);
-    });
+    }
 
     private static byte[] Serialize(MessageContent content) => JsonSerializer.SerializeToUtf8Bytes(content, WireJson.Options);
 
@@ -615,6 +648,27 @@ public sealed class Messenger : IDisposable
         return _store.GetMessage(id);
     });
 
+    /// <summary>Sends an image or video to everyone in the group (see <see cref="SendFileAsync"/>).</summary>
+    public Task<StoredMessage> SendGroupFileAsync(string groupId, string path, string caption = "", CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        var group = ActiveGroup(groupId);
+        if (group.Members.Count == 0) throw new MessengerException("No one else is in this group.");
+        if (group.Members.FirstOrDefault(m => _store.GetContact(m) is { IdentityChanged: true }) is { } flagged)
+            throw new IdentityChangedException(flagged);
+        var media = await UploadAsync(path, group.Members, ct);
+        var id = await FanOutAsync(group.Members, new MessageContent("text", caption, 0, new GroupContext(groupId), media.Pointer), sentAt =>
+        {
+            var messageId = _store.InsertMessage(Username!, true, caption, sentAt, MessageStatus.Pending, groupId);
+            KeepOwnCopy(messageId, media);
+            return messageId;
+        }, ct);
+        return _store.GetMessage(id);
+    });
+
+    /// <summary>Tests only: the signed relay client, to act as this user directly.</summary>
+    internal RelayClient RelayForTest => _relay;
+
     /// <summary>Tests only: sends arbitrary content to one peer, as a modified client could.</summary>
     internal Task SendRawForTestAsync(string peer, MessageContent content) => Locked(() =>
         FanOutAsync([peer], content, t => _store.InsertMessage(peer, true, "(raw)", t, MessageStatus.Pending), default));
@@ -692,8 +746,9 @@ public sealed class Messenger : IDisposable
     }
 
     /// <summary>Applies a group message or update from <paramref name="sender"/>. Runs inside the caller's transaction.</summary>
-    private (long? MessageId, string? Problem) ReceiveGroup(string sender, MessageContent content, DateTimeOffset sentAt)
+    private (long? MessageId, string? Problem) ReceiveGroup(string sender, MessageContent content, DateTimeOffset sentAt, out bool isUpdate)
     {
+        isUpdate = false;
         var ctx = content.Group!;
         if (ctx.Id.Length != 32 || !ctx.Id.All(Uri.IsHexDigit)) return (null, $"Ignored a malformed group message from {sender}.");
         var group = _store.GetGroup(ctx.Id);
@@ -705,6 +760,11 @@ public sealed class Messenger : IDisposable
                 if (group is { Active: false }) return (null, null); // we left; ignore quietly
                 if (!isMember) return (null, $"Dropped a group message from {sender}: they aren't in that group.");
                 return (_store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received, ctx.Id), null);
+
+            case "reaction":
+                if (!isMember) return (null, null);
+                isUpdate = true;
+                return (ApplyReaction(sender, ctx.Id, content.Reaction), null);
 
             case "group_leave":
                 if (!isMember) return (null, null);
@@ -734,6 +794,169 @@ public sealed class Messenger : IDisposable
             default:
                 return (null, null); // from a newer version; nothing we can show
         }
+    }
+
+    // ================================================================ attachments
+    //
+    // The sender encrypts each file with a fresh random AES-256-GCM key and uploads only the
+    // ciphertext to the relay, naming who may fetch it. The key, the ciphertext's SHA-256, and
+    // the relay's id travel inside the ratchet message. Each recipient downloads, checks the
+    // hash, decrypts, saves the file on their own device (encrypted under the profile's master
+    // key), and acknowledges; the relay deletes the blob once everyone has it.
+
+    private static readonly byte[] AttachmentAd = Encoding.UTF8.GetBytes("COSC483-ATTACHMENT-v1");
+
+    private sealed record PreparedMedia(AttachmentPointer Pointer, byte[] Plaintext);
+
+    private async Task<PreparedMedia> UploadAsync(string path, IReadOnlyCollection<string> recipients, CancellationToken ct)
+    {
+        var info = new FileInfo(path);
+        if (!info.Exists) throw new MessengerException($"File not found: {path}");
+        var type = MediaTypes.ForFileName(info.Name)
+            ?? throw new MessengerException("Only images and videos can be sent (jpg, png, gif, webp, heic, mp4, mov, webm and similar).");
+        if (info.Length == 0) throw new MessengerException("That file is empty.");
+        if (info.Length > Attachments.MaxPlaintextBytes)
+            throw new MessengerException($"That file is {MediaTypes.FormatSize(info.Length)}; the limit is {MediaTypes.FormatSize(Attachments.MaxPlaintextBytes)}.");
+
+        var plaintext = await File.ReadAllBytesAsync(path, ct);
+        var key = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        var ciphertext = P.AeadEncrypt(key, plaintext, AttachmentAd);
+        var id = await _relay.UploadAttachmentAsync(ciphertext, recipients, ct);
+        return new PreparedMedia(new AttachmentPointer(id, key, System.Security.Cryptography.SHA256.HashData(ciphertext),
+            plaintext.Length, type, MediaTypes.CleanFileName(info.Name)), plaintext);
+    }
+
+    /// <summary>The sender keeps the file too, so it shows in their own history. Runs inside a transaction.</summary>
+    private void KeepOwnCopy(long messageId, PreparedMedia media) =>
+        _store.PutAttachment(messageId, media.Pointer, AttachmentState.Ready, _store.WriteMedia(media.Plaintext));
+
+    /// <summary>Checks a received pointer and queues the download. Runs inside the caller's transaction.</summary>
+    private string? AcceptAttachment(long messageId, string sender, AttachmentPointer p)
+    {
+        var name = MediaTypes.CleanFileName(p.FileName ?? "");
+        // The type comes from our own list, never from what the sender claimed.
+        if (MediaTypes.ForFileName(name) is not { } type || !Attachments.IsValidId(p.Id) || p.Key?.Length != 32
+            || p.Digest?.Length != 32 || p.Size is <= 0 or > Attachments.MaxPlaintextBytes)
+            return $"{sender} sent an attachment that isn't an image or video this app accepts; it was ignored.";
+        _store.PutAttachment(messageId, p with { FileName = name, ContentType = type }, AttachmentState.Downloading, null);
+        return null;
+    }
+
+    /// <summary>Fetches one queued attachment. Returns null if the relay is unreachable (try again later).</summary>
+    private async Task<StoredMessage?> DownloadAsync(long messageId, List<string> problems, CancellationToken ct)
+    {
+        var (p, _, _) = _store.GetAttachment(messageId)!.Value;
+        var sender = _store.GetMessage(messageId).Peer;
+        string? failure = null;
+        byte[]? plaintext = null;
+        try
+        {
+            var blob = await _relay.DownloadAttachmentAsync(p.Id, ct);
+            if (!System.Security.Cryptography.SHA256.HashData(blob).AsSpan().SequenceEqual(p.Digest))
+                failure = $"An attachment from {sender} didn't match what they sent (the relay changed it), so it was discarded.";
+            else
+            {
+                plaintext = P.AeadDecrypt(p.Key, blob, AttachmentAd);
+                if (plaintext.Length != p.Size) failure = $"An attachment from {sender} had the wrong size, so it was discarded.";
+            }
+        }
+        catch (RelayException e) when (e.Status is null) { return null; }
+        catch (RelayException e) { failure = $"Couldn't download an attachment from {sender}: {e.Message}"; }
+        catch (Exception e) when (e is System.Security.Cryptography.CryptographicException or ArgumentException)
+        {
+            failure = $"An attachment from {sender} couldn't be decrypted, so it was discarded.";
+        }
+
+        using (var tx = _store.Begin())
+        {
+            if (failure is null) _store.SetAttachmentState(messageId, AttachmentState.Ready, _store.WriteMedia(plaintext!));
+            else _store.SetAttachmentState(messageId, AttachmentState.Failed, null);
+            tx.Commit();
+        }
+        if (failure is null)
+        {
+            try { await _relay.AckAttachmentAsync(p.Id, ct); }
+            catch (RelayException) { /* the relay deletes it after the retention period anyway */ }
+        }
+        else problems.Add(failure);
+        return _store.GetMessage(messageId);
+    }
+
+    /// <summary>The decrypted file, for showing an image.</summary>
+    public Task<byte[]> AttachmentBytesAsync(long messageId) => Locked(() => _store.ReadMedia(ReadyFile(messageId).File));
+
+    /// <summary>
+    /// Writes the attachment out as an ordinary file in <paramref name="directory"/> (to keep it,
+    /// or to open it in another app) and returns its path. The extension comes from the
+    /// attachment's type, so a file can't pose as a program.
+    /// </summary>
+    public Task<string> ExportAttachmentAsync(long messageId, string directory) => Locked(() =>
+    {
+        var (p, file) = ReadyFile(messageId);
+        Directory.CreateDirectory(directory);
+        var invalid = Path.GetInvalidFileNameChars().Concat([':', '/', '\\']).ToHashSet();
+        var stem = new string(Path.GetFileNameWithoutExtension(p.FileName).Select(c => invalid.Contains(c) ? '_' : c).ToArray()).TrimStart('.');
+        if (stem.Length == 0) stem = "attachment";
+        var ext = MediaTypes.ExtensionFor(p.ContentType);
+        var path = Path.Combine(directory, stem + ext);
+        for (var i = 2; File.Exists(path); i++) path = Path.Combine(directory, $"{stem} ({i}){ext}");
+        File.WriteAllBytes(path, _store.ReadMedia(file));
+        return path;
+    });
+
+    /// <summary>Where plaintext copies made for opening in other apps go. Emptied when the profile closes.</summary>
+    public string OpenFolder => Path.Combine(_dataDir, "open");
+
+    private (AttachmentPointer Pointer, string File) ReadyFile(long messageId)
+    {
+        var a = _store.GetAttachment(messageId) ?? throw new MessengerException("That message has no attachment.");
+        if (a.State != AttachmentState.Ready || a.File is null) throw new MessengerException("That attachment hasn't been downloaded.");
+        return (a.Pointer, a.File);
+    }
+
+    // ================================================================ reactions
+
+    /// <summary>The quick reactions the app offers. Any short emoji is accepted from others.</summary>
+    public static readonly IReadOnlyList<string> QuickReactions = ["👍", "❤️", "😂", "😮", "😢", "🙏"];
+
+    private static bool IsValidReaction(string? emoji) =>
+        emoji is { Length: > 0 and <= 16 } && !emoji.Any(char.IsControl) && !string.IsNullOrWhiteSpace(emoji) && !emoji.Any(char.IsAsciiLetterOrDigit);
+
+    /// <summary>Reacts to a message, replacing your earlier reaction; null takes it back. Everyone in the chat is told.</summary>
+    public Task<StoredMessage> ReactAsync(long messageId, string? emoji, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        if (emoji is not null && !IsValidReaction(emoji)) throw new MessengerException("That isn't a reaction.");
+        var target = _store.GetMessage(messageId);
+        if (target.IsEvent) throw new MessengerException("You can only react to messages.");
+        var author = target.Outgoing ? Username! : target.Peer;
+        var reaction = new ReactionContent(author, target.SentAt.ToUnixTimeMilliseconds(), emoji);
+        IReadOnlyList<string> recipients;
+        if (target.GroupId is { } gid) recipients = ActiveGroup(gid).Members;
+        else
+        {
+            CheckDirectPeer(target.Peer);
+            recipients = [target.Peer];
+        }
+        var content = new MessageContent("reaction", "", 0, target.GroupId is null ? null : new GroupContext(target.GroupId), Reaction: reaction);
+        await FanOutAsync(recipients, content, sentAt =>
+        {
+            _store.SetReaction(messageId, Username!, emoji);
+            // Never shown; it carries the delivery of the reaction's copies.
+            return _store.InsertMessage(target.GroupId is null ? target.Peer : Username!, true, "", sentAt, MessageStatus.Pending, target.GroupId, kind: "control");
+        }, ct);
+        return _store.GetMessage(messageId);
+    });
+
+    /// <summary>Applies a reaction from <paramref name="sender"/>. Returns the message it changed, if any. Runs inside a transaction.</summary>
+    private long? ApplyReaction(string sender, string? groupId, ReactionContent? r)
+    {
+        if (r is null || !Usernames.IsValid(r.Author) || (r.Emoji is not null && !IsValidReaction(r.Emoji))) return null;
+        // In a direct chat, only messages between the two of you can be reacted to.
+        if (groupId is null && r.Author != sender && r.Author != Username) return null;
+        if (_store.FindMessage(groupId, sender, r.Author, r.Author == Username, r.SentAt) is not { } target) return null;
+        _store.SetReaction(target, sender, r.Emoji);
+        return target;
     }
 
     // ================================================================ receiving
@@ -773,6 +996,7 @@ public sealed class Messenger : IDisposable
                 if (!await DeliverCopiesAsync(messageId, problems, ct)) break;
 
         var received = new List<StoredMessage>();
+        var updated = new List<StoredMessage>();
         var changed = new List<string>();
         var consumedPrekey = false;
         while (true)
@@ -787,6 +1011,7 @@ public sealed class Messenger : IDisposable
                 {
                     var outcome = await ProcessAsync(item, ct);
                     if (outcome.Message is not null) received.Add(outcome.Message);
+                    if (outcome.Updated is not null) updated.Add(outcome.Updated);
                     if (outcome.Problem is not null) problems.Add(outcome.Problem);
                     consumedPrekey |= outcome.UsedPrekey;
                     if (outcome.Held)
@@ -801,11 +1026,24 @@ public sealed class Messenger : IDisposable
             if (inbox.Messages.Count < 100 || handled.Count == 0) break;
         }
 
+        // Attachments that arrived (now or earlier, if the relay was down) are fetched last.
+        foreach (var messageId in _store.AttachmentsToDownload())
+        {
+            if (await DownloadAsync(messageId, problems, ct) is not { } done) break;
+            if (received.FindIndex(m => m.Id == done.Id) is var i and >= 0) received[i] = done;
+            else updated.Add(done);
+        }
+
         await MaintainPrekeysAsync(consumedPrekey, ct);
-        return new SyncResult(received, problems, changed);
+        // Report each message once, as it is now: a message that arrived and was reacted to in
+        // the same sync is just "received", with its reactions.
+        for (var i = 0; i < received.Count; i++) received[i] = _store.GetMessage(received[i].Id);
+        var receivedIds = received.Select(m => m.Id).ToHashSet();
+        var latest = updated.Select(m => m.Id).Distinct().Where(id => !receivedIds.Contains(id)).Select(_store.GetMessage).ToList();
+        return new SyncResult(received, problems, changed, latest);
     });
 
-    private sealed record Outcome(StoredMessage? Message, string? Problem, bool UsedPrekey, bool Held = false);
+    private sealed record Outcome(StoredMessage? Message, string? Problem, bool UsedPrekey, bool Held = false, StoredMessage? Updated = null);
 
     private async Task<Outcome> ProcessAsync(InboxItem item, CancellationToken ct)
     {
@@ -828,15 +1066,21 @@ public sealed class Messenger : IDisposable
                 ?? throw new ProtocolException("empty message");
             var sentAt = DateTimeOffset.FromUnixTimeMilliseconds(content.SentAt);
             // The session advanced either way, so the transaction commits even if the content is refused.
+            var isUpdate = false;
             var (id, problem) = content switch
             {
-                { Group: not null } => ReceiveGroup(sender, content, sentAt),
+                { Group: not null } => ReceiveGroup(sender, content, sentAt, out isUpdate),
                 { Type: "text" } => ((long?)_store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received), (string?)null),
+                { Type: "reaction" } => (ApplyReaction(sender, null, content.Reaction), (string?)null),
                 _ => ((long?)null, (string?)null),
             };
+            if (content.Type == "reaction") isUpdate = true;
+            else if (id is { } newId && content is { Type: "text", Attachment: { } pointer })
+                problem ??= AcceptAttachment(newId, sender, pointer);
             _store.MarkProcessed(item.Id, problem is null ? "ok" : "refused");
             tx.Commit();
-            return new Outcome(id is { } stored ? _store.GetMessage(stored) : null, problem, usedPrekey);
+            var stored = id is { } sid ? _store.GetMessage(sid) : null;
+            return isUpdate ? new Outcome(null, problem, usedPrekey, Updated: stored) : new Outcome(stored, problem, usedPrekey);
         }
         catch (IdentityChangedException)
         {

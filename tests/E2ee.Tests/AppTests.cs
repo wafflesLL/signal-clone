@@ -451,6 +451,93 @@ public sealed class AppTests : IDisposable
         }
     }
 
+    /// <summary>A real PNG, so the app has something to decode and show.</summary>
+    private static string SunsetPng(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var path = Path.Combine(dir, "sunset.png");
+        using var bmp = new Avalonia.Media.Imaging.RenderTargetBitmap(new PixelSize(480, 300));
+        using (var ctx = bmp.CreateDrawingContext())
+        {
+            ctx.FillRectangle(new Avalonia.Media.LinearGradientBrush
+            {
+                StartPoint = new RelativePoint(0, 0, RelativeUnit.Relative), EndPoint = new RelativePoint(0, 1, RelativeUnit.Relative),
+                GradientStops = { new(Avalonia.Media.Color.Parse("#3A1C71"), 0), new(Avalonia.Media.Color.Parse("#D76D77"), 0.6), new(Avalonia.Media.Color.Parse("#FFAF7B"), 1) },
+            }, new Rect(0, 0, 480, 300));
+            ctx.DrawEllipse(Avalonia.Media.Brushes.Gold, null, new Point(240, 230), 70, 70);
+            ctx.FillRectangle(new Avalonia.Media.SolidColorBrush(Avalonia.Media.Color.Parse("#1D3557")), new Rect(0, 230, 480, 70));
+        }
+        bmp.Save(path);
+        return path;
+    }
+
+    [AvaloniaFact]
+    public async Task PhotosVideosAndReactions()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        var files = Path.Combine(Path.GetTempPath(), $"e2ee-app-media-{Guid.NewGuid():N}");
+        var opened = new List<string>();
+        shell.OpenFile = opened.Add;
+        shell.DownloadsFolder = Path.Combine(files, "Downloads");
+
+        shell.NewContact = "bob";
+        await shell.AddContactCommand.ExecuteAsync(null);
+        shell.Draft = "Sunset from the lab roof";
+        await shell.SendFileAsync(SunsetPng(files));
+        await Settle();
+        var photo = Assert.Single(shell.Messages);
+        Assert.True(photo.HasImage); // decrypted from this device's copy and shown inline
+        Assert.Equal("Sunset from the lab roof", photo.Text);
+        Assert.Equal("", shell.Draft);
+        Assert.Equal("You: 📷 Sunset from the lab roof", shell.Selected!.Preview);
+
+        // Bob gets it, loves it, and replies with a video.
+        var atBob = Assert.Single((await bob.SyncAsync()).Received);
+        Assert.Equal(AttachmentState.Ready, atBob.Attachment!.State);
+        await bob.ReactAsync(atBob.Id, "❤️");
+        var clip = Path.Combine(files, "timelapse.mp4");
+        File.WriteAllBytes(clip, new byte[150_000]);
+        await bob.SendFileAsync("alice", clip, "timelapse!");
+        await shell.SyncNowAsync();
+        await Settle();
+        Assert.Equal("❤️", photo.ReactionsText);
+        var video = shell.Messages[1];
+        Assert.True(video.ShowFileCard);
+        Assert.Equal("🎬  timelapse.mp4 · 146 KB", video.FileLabel);
+
+        // Alice reacts; picking the same reaction again takes it back.
+        await video.ReactCommand.ExecuteAsync("😂");
+        Assert.Equal("😂", video.MyReaction);
+        Assert.Equal([new Reaction("alice", "😂")], (await bob.SyncAsync()).Updated.Single().Reactions);
+        await video.ReactCommand.ExecuteAsync("😂");
+        Assert.False(video.HasReactions);
+        await video.ReactCommand.ExecuteAsync("👍");
+
+        // Open hands the system a plaintext copy with a safe extension; Save keeps one in Downloads.
+        await video.OpenCommand.ExecuteAsync(null);
+        Assert.Equal(".mp4", Path.GetExtension(Assert.Single(opened)));
+        await video.SaveCommand.ExecuteAsync(null);
+        Assert.True(File.Exists(Path.Combine(shell.DownloadsFolder, "timelapse.mp4")));
+        Assert.Contains("Saved to Downloads", shell.Notice);
+        shell.DismissNoticeCommand.Execute(null);
+        Screenshot(window, "12-photos-and-reactions");
+
+        // Not images or videos: refused with a notice, draft kept.
+        var script = Path.Combine(files, "notes.sh");
+        File.WriteAllText(script, "echo hi");
+        shell.Draft = "keep me";
+        await shell.SendFileAsync(script);
+        Assert.Contains("Only images and videos", shell.Notice);
+        Assert.Equal("keep me", shell.Draft);
+        vm.Dispose();
+        Directory.Delete(files, recursive: true);
+    }
+
     [AvaloniaFact]
     public async Task PushDeliversWithoutPolling()
     {

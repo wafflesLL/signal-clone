@@ -40,6 +40,36 @@
       <Setter Property="FontSize" Value="11" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <Style Selector="Button.image">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.filecard">
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Background" Value="#22000000" />
+    </Style>
+    <Style Selector="Border.reactions">
+      <Setter Property="Padding" Value="6,1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="#26000000" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Button.react">
+      <Setter Property="Padding" Value="4,0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Opacity" Value="0.6" />
+    </Style>
+    <Style Selector="Button.react:pointerover">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing Button.react">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
     <Style Selector="Border.pane">
       <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
     </Style>
@@ -104,7 +134,7 @@
     </Border>
 
     <!-- Conversation -->
-    <DockPanel Grid.Column="1">
+    <DockPanel Grid.Column="1" DragDrop.AllowDrop="True" Background="Transparent">
       <Border DockPanel.Dock="Top" IsVisible="{Binding HasNotice}" Background="#FFF4CE" Padding="12,8">
         <Grid ColumnDefinitions="*,Auto">
           <TextBlock Text="{Binding Notice}" Foreground="#3B2F00" TextWrapping="Wrap" VerticalAlignment="Center" />
@@ -161,14 +191,21 @@
                        Text="You left this group. You can still read the history, but you won't get new messages." />
           </Border>
 
-          <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
-            <TextBox Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
+          <Grid DockPanel.Dock="Bottom" ColumnDefinitions="Auto,8,*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
+            <Button Name="AttachButton" Content="📎" FontSize="16" Padding="10,4" VerticalAlignment="Bottom" Click="OnAttachClick"
+                    IsEnabled="{Binding !IsUploading}" ToolTip.Tip="Send a photo or video (or drop one here)" />
+            <TextBox Grid.Column="2" Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
               <TextBox.KeyBindings>
                 <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
               </TextBox.KeyBindings>
             </TextBox>
-            <Button Grid.Column="2" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
+            <Button Grid.Column="4" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
           </Grid>
+
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="20,4,20,0" IsVisible="{Binding IsUploading}">
+            <ProgressBar IsIndeterminate="True" Width="120" VerticalAlignment="Center" />
+            <TextBlock Classes="muted" FontSize="12" Text="Encrypting and uploading…" />
+          </StackPanel>
 
           <ScrollViewer Name="MessageScroller" Padding="20,10">
             <ItemsControl ItemsSource="{Binding Messages}">
@@ -179,11 +216,58 @@
                                Text="{Binding Text}" IsVisible="{Binding IsEvent}" />
                     <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}"
                             IsVisible="{Binding IsBubble}">
-                      <StackPanel>
+                      <StackPanel Spacing="2">
                         <TextBlock Name="SenderName" Text="{Binding Sender}" FontSize="12" FontWeight="Bold"
                                    Foreground="{Binding SenderBrush}" Margin="0,0,0,2" IsVisible="{Binding ShowSender}" />
-                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                        <TextBlock Classes="meta" Text="{Binding MetaText}" />
+
+                        <!-- Attachment: the image itself, a file card for videos, or its status -->
+                        <Button Classes="image" Command="{Binding OpenCommand}" IsVisible="{Binding HasImage}" ToolTip.Tip="Open">
+                          <Image Source="{Binding Image}" MaxWidth="320" MaxHeight="320" Stretch="Uniform" />
+                        </Button>
+                        <Border Classes="filecard" IsVisible="{Binding ShowFileCard}">
+                          <StackPanel Spacing="6">
+                            <TextBlock Text="{Binding FileLabel}" TextTrimming="CharacterEllipsis" MaxWidth="300" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <Button Content="Open" Command="{Binding OpenCommand}" />
+                              <Button Content="Save" Command="{Binding SaveCommand}" />
+                            </StackPanel>
+                          </StackPanel>
+                        </Border>
+                        <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding IsDownloading}">
+                          <ProgressBar IsIndeterminate="True" Width="60" VerticalAlignment="Center" />
+                          <TextBlock FontSize="12" Text="Downloading…" />
+                        </StackPanel>
+                        <TextBlock FontSize="12" TextWrapping="Wrap" IsVisible="{Binding AttachmentFailed}"
+                                   Text="⚠ This attachment couldn't be downloaded (it expired, or was altered on the way)." />
+
+                        <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" IsVisible="{Binding HasText}" />
+
+                        <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,2,0,0">
+                          <Border Classes="reactions" IsVisible="{Binding HasReactions}" ToolTip.Tip="{Binding ReactionsTip}">
+                            <TextBlock Text="{Binding ReactionsText}" FontSize="13" />
+                          </Border>
+                          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Bottom">
+                            <Button Name="ReactButton" Classes="react" Content="☺" ToolTip.Tip="React">
+                              <Button.Flyout>
+                                <Flyout Placement="Top">
+                                  <ItemsControl ItemsSource="{x:Static vm:MessageViewModel.QuickReactions}" x:DataType="vm:MessageViewModel">
+                                    <ItemsControl.ItemsPanel>
+                                      <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="2" /></ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                      <DataTemplate x:DataType="x:String">
+                                        <Button Content="{Binding}" FontSize="20" Padding="6,2" Background="Transparent"
+                                                Command="{Binding $parent[ItemsControl].((vm:MessageViewModel)DataContext).ReactCommand}"
+                                                CommandParameter="{Binding}" />
+                                      </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                  </ItemsControl>
+                                </Flyout>
+                              </Button.Flyout>
+                            </Button>
+                            <TextBlock Classes="meta" Text="{Binding MetaText}" VerticalAlignment="Center" Margin="0" />
+                          </StackPanel>
+                        </Grid>
                       </StackPanel>
                     </Border>
                   </Panel>

@@ -117,6 +117,28 @@ another out; the only way out is to leave. Sending to a group is blocked while a
 safety number change is unresolved (leaving is not: it skips that member). The cost is N−1
 encryptions and uploads per message, which is fine for the 50-person cap.
 
+**Photos, videos, and reactions.** Media is stored on the users' devices; the relay only
+passes it along. The sender reads the file, picks a fresh random 256-bit key, encrypts it
+with AES-256-GCM (associated data `COSC483-ATTACHMENT-v1`), and uploads the ciphertext to
+`POST /v1/attachments?to=…`, naming who may fetch it. The ratchet message then carries a
+pointer: the relay's random id, the key, the SHA-256 of the ciphertext, the size, and the
+file name. Each recipient downloads with a signed request (the relay serves it only to the
+named recipients), checks the hash and size, decrypts, writes the file into the profile's
+`media/` folder encrypted under the master key, and acknowledges. The relay deletes the blob
+once every recipient has acknowledged it, or after 14 days. So the relay never sees a key,
+a file name, or plaintext, and holds ciphertext only in transit. One upload serves a whole
+group, while the pointer is fanned out like any group message. Only images and videos are
+accepted (up to 100 MB), and the type is always taken from our own list by file extension,
+never from what the sender claims; when a file is opened in another app, its extension comes
+from that type too, so a message can't smuggle in a program disguised as a video. Opening a
+file writes a plaintext copy to the profile's `open/` folder, which is emptied when the app
+closes (a documented weak spot: other apps can read it while it's there).
+
+A reaction is a small ratchet message naming the target by its author and send timestamp
+(as Signal does), plus the emoji, or none to take it back. Each person has at most one
+reaction per message. In groups, reactions are accepted only from members, and in direct
+chats only for messages between the two people.
+
 **Relay authentication.** Usernames are bound to an Ed25519 identity key on first
 registration (trust on first use at the server). Every request is signed with that key over
 the method, path, username, a millisecond timestamp, and a hash of the body. The relay
@@ -159,6 +181,9 @@ until the user runs `trust`.
   (zero-knowledge group credentials), and not MLS. Membership is agreed only among the
   members, with no server enforcing it, so a malicious member could tell different people
   different member lists. Removing someone else from a group isn't supported.
+- Attachments use AES-256-GCM with a random key plus a SHA-256 of the ciphertext, where
+  Signal uses AES-CBC with HMAC-SHA256 and a digest. Both give integrity; ours needs no
+  padding. Files are read into memory whole, which is why the limit is 100 MB.
 - One device per account. Signal's multi-device support (Sesame) is out of scope.
 - Contact discovery is by exact username, not by phone number.
 
@@ -175,7 +200,7 @@ Dates are relative to the start. Adjust them once the due date is known.
 | 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | Done; tested headlessly. Still to do: a hands-on run on macOS and Windows, and two laptops |
 | 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | Done, with long polling instead of SignalR. Builds are made by `scripts/package-app.sh` but not yet attached to a GitHub release. Not yet tested on a real screen or on Windows |
 | 6 | 4–5 | **Security demos** in tests and a scripted CLI demo: forward secrecy, post-compromise security, server-only-sees-ciphertext. Run a small usability check with a few classmates. | 4 | |
-| 7 | 5 | **Stretch**: group messaging, then attachments (encrypt the file, send the key in a message). | 4, 5 | Group chats done early, with client-side fan-out instead of sender keys (see Group chats). Attachments not started |
+| 7 | 5 | **Stretch**: group messaging, then attachments (encrypt the file, send the key in a message). | 4, 5 | Done early: group chats with client-side fan-out instead of sender keys, photos and videos stored on devices (relay holds ciphertext only in transit), and reactions |
 | 8 | 5–6 | Report writing, figures and screenshots, artifact zip, transcripts. | all | |
 
 Write the report continuously. Background (§2) can be written while reading the specs,
@@ -216,7 +241,10 @@ trusts a plain statement like that more than an overclaim.
   round trip. That plot makes a good figure for §4.
 - **Untrusted server**: run a full conversation in the app and grep the server DB and logs
   for the plaintexts. There should be zero hits. Be honest that metadata (who talks to
-  whom and when) stays visible to the relay.
+  whom and when) stays visible to the relay. `ImageArrivesAndOnlyDevicesKeepIt` already
+  checks this for a photo: the relay's copy is gone once delivered, and the plaintext
+  appears nowhere in the recipient's profile. `TamperedBlobIsDiscarded` shows a relay that
+  alters a file is caught.
 - **Active attacker at the relay**: show that a relay that swaps in its own prekey bundle
   is caught when the users compare safety numbers, and that the app warns when a known
   contact's identity key changes. Already covered by tests (`RelaySwappingIdentityKeyIsDetected`,

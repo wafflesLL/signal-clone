@@ -1,5 +1,6 @@
 using Avalonia.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using E2ee.Messaging;
 
 namespace E2ee.App.ViewModels;
@@ -99,24 +100,54 @@ public sealed partial class ContactViewModel : ViewModelBase
     public void Update(StoredMessage m)
     {
         var who = m.IsEvent ? "" : m.Outgoing ? "You: " : IsGroup ? $"{m.Peer}: " : "";
-        Preview = who + m.Text.ReplaceLineEndings(" ");
+        var body = m.Text.ReplaceLineEndings(" ");
+        if (m.Attachment is { } a) body = (a.IsVideo ? "🎬 " : "📷 ") + (body.Length > 0 ? body : a.IsVideo ? "Video" : "Photo");
+        Preview = who + body;
         TimeText = Display.Time(m.SentAt);
     }
 }
 
-public sealed partial class MessageViewModel(StoredMessage m) : ViewModelBase
+/// <summary>What a message bubble can ask the shell to do.</summary>
+public interface IMessageActions
 {
-    public long Id { get; } = m.Id;
-    public string Text { get; } = m.Text;
-    public bool Outgoing { get; } = m.Outgoing;
+    string Me { get; }
+    Task ReactAsync(MessageViewModel message, string? emoji);
+    Task OpenAttachmentAsync(MessageViewModel message);
+    Task SaveAttachmentAsync(MessageViewModel message);
+}
+
+public sealed partial class MessageViewModel : ViewModelBase
+{
+    private readonly IMessageActions? _actions;
+    private readonly string _time;
+    private readonly bool _inGroup;
+
+    public MessageViewModel(StoredMessage m, IMessageActions? actions = null)
+    {
+        _actions = actions;
+        Id = m.Id;
+        Text = m.Text;
+        Outgoing = m.Outgoing;
+        IsEvent = m.IsEvent;
+        Sender = m.Peer;
+        _inGroup = m.GroupId is not null;
+        ShowSender = _inGroup && !m.Outgoing && !m.IsEvent;
+        _time = Display.Time(m.SentAt);
+        Update(m);
+    }
+
+    public long Id { get; }
+    public string Text { get; }
+    public bool HasText => Text.Length > 0;
+    public bool Outgoing { get; }
 
     /// <summary>A line about the group ("bob left"), shown centered instead of as a bubble.</summary>
-    public bool IsEvent { get; } = m.IsEvent;
+    public bool IsEvent { get; }
     public bool IsBubble => !IsEvent;
 
     /// <summary>Who wrote it, shown above incoming group messages.</summary>
-    public string Sender { get; } = m.Peer;
-    public bool ShowSender { get; } = m.GroupId is not null && !m.Outgoing && !m.IsEvent;
+    public string Sender { get; }
+    public bool ShowSender { get; }
 
     /// <summary>The sender's color slot in this chat (see <see cref="SenderColors"/>).</summary>
     public int SenderSlot { get; private set; }
@@ -129,11 +160,9 @@ public sealed partial class MessageViewModel(StoredMessage m) : ViewModelBase
         SenderBrush = SenderColors.Brush(slot);
     }
 
-    private readonly string _time = Display.Time(m.SentAt);
-
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(MetaText), nameof(IsPending), nameof(IsFailed))]
-    private MessageStatus _status = m.Status;
+    private MessageStatus _status;
 
     public bool IsPending => Status == MessageStatus.Pending;
     public bool IsFailed => Status == MessageStatus.Failed;
@@ -141,7 +170,65 @@ public sealed partial class MessageViewModel(StoredMessage m) : ViewModelBase
     public string MetaText => Status switch
     {
         MessageStatus.Pending => $"{_time} · sending…",
-        MessageStatus.Failed => m.GroupId is null ? $"{_time} · not delivered" : $"{_time} · not delivered to everyone",
+        MessageStatus.Failed => _inGroup ? $"{_time} · not delivered to everyone" : $"{_time} · not delivered",
         _ => _time,
     };
+
+    // ---------------------------------------------------------------- attachment
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasAttachment), nameof(IsDownloading), nameof(AttachmentFailed), nameof(ShowFileCard), nameof(FileLabel), nameof(IsReady))]
+    private Attachment? _attachment;
+
+    /// <summary>The decoded image, once loaded. Null for videos and for images this platform can't decode.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasImage), nameof(ShowFileCard))]
+    private Avalonia.Media.Imaging.Bitmap? _image;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(ShowFileCard))]
+    private bool _imageLoading;
+
+    public bool HasAttachment => Attachment is not null;
+    public bool IsReady => Attachment is { State: AttachmentState.Ready };
+    public bool IsDownloading => Attachment is { State: AttachmentState.Downloading };
+    public bool AttachmentFailed => Attachment is { State: AttachmentState.Failed };
+    public bool HasImage => Image is not null;
+
+    /// <summary>Videos, and images that can't be shown inline: a card with Open and Save.</summary>
+    public bool ShowFileCard => IsReady && Image is null && !ImageLoading;
+
+    public string FileLabel => Attachment is { } a ? $"{(a.IsVideo ? "🎬" : "🖼")}  {a.FileName} · {MediaTypes.FormatSize(a.Size)}" : "";
+
+    [RelayCommand] private Task OpenAsync() => _actions?.OpenAttachmentAsync(this) ?? Task.CompletedTask;
+    [RelayCommand] private Task SaveAsync() => _actions?.SaveAttachmentAsync(this) ?? Task.CompletedTask;
+
+    // ---------------------------------------------------------------- reactions
+
+    public static IReadOnlyList<string> QuickReactions => Messenger.QuickReactions;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasReactions), nameof(ReactionsText), nameof(ReactionsTip), nameof(MyReaction))]
+    private IReadOnlyList<Reaction> _reactions = [];
+
+    public bool HasReactions => Reactions.Count > 0;
+
+    /// <summary>"👍 2  ❤️" — each emoji once, with a count when more than one person used it.</summary>
+    public string ReactionsText => string.Join("  ", Reactions.GroupBy(r => r.Emoji)
+        .Select(g => g.Count() > 1 ? $"{g.Key} {g.Count()}" : g.Key));
+
+    public string ReactionsTip => string.Join("\n", Reactions.Select(r => $"{r.Emoji}  {(r.Reactor == _actions?.Me ? "You" : r.Reactor)}"));
+
+    public string? MyReaction => Reactions.FirstOrDefault(r => r.Reactor == _actions?.Me)?.Emoji;
+
+    /// <summary>Picking your current reaction again takes it back.</summary>
+    [RelayCommand]
+    private Task ReactAsync(string emoji) => _actions?.ReactAsync(this, emoji == MyReaction ? null : emoji) ?? Task.CompletedTask;
+
+    public void Update(StoredMessage m)
+    {
+        Status = m.Status;
+        Attachment = m.Attachment;
+        Reactions = m.Reactions;
+    }
 }
