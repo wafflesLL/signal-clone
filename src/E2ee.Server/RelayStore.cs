@@ -169,6 +169,13 @@ public sealed class RelayStore
         return items;
     }
 
+    public bool HasMessagesAfter(string user, long afterId)
+    {
+        using var c = Open();
+        using var cmd = Cmd(c, null, "SELECT 1 FROM inbox WHERE recipient = $u AND id > $a LIMIT 1", ("$u", user), ("$a", afterId));
+        return cmd.ExecuteScalar() is not null;
+    }
+
     public void Ack(string user, IEnumerable<long> ids)
     {
         using var c = Open();

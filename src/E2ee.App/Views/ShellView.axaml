@@ -28,6 +28,18 @@
       <Setter Property="HorizontalAlignment" Value="Right" />
       <Setter Property="Margin" Value="0,2,0,0" />
     </Style>
+    <Style Selector="Border.badge">
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Padding" Value="7,1" />
+    </Style>
+    <Style Selector="Border.badge.verified">
+      <Setter Property="Background" Value="#DFF6DD" />
+    </Style>
+    <Style Selector="Border.badge.verified TextBlock">
+      <Setter Property="Foreground" Value="#0E6027" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
     <Style Selector="Border.pane">
       <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
     </Style>
@@ -70,7 +82,11 @@
                   <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="SemiBold"
                              HorizontalAlignment="Center" VerticalAlignment="Center" />
                 </Border>
-                <TextBlock Grid.Column="1" Margin="10,0,6,0" Text="{Binding Username}" FontWeight="SemiBold" VerticalAlignment="Bottom" />
+                <StackPanel Grid.Column="1" Margin="10,0,6,0" Orientation="Horizontal" Spacing="5" VerticalAlignment="Bottom">
+                  <TextBlock Text="{Binding Username}" FontWeight="SemiBold" />
+                  <TextBlock Text="✓" Foreground="#2E9E6B" FontWeight="Bold" IsVisible="{Binding Verified}" ToolTip.Tip="Safety number verified" />
+                  <TextBlock Text="⚠" Foreground="#D13438" IsVisible="{Binding IdentityChanged}" ToolTip.Tip="Safety number changed" />
+                </StackPanel>
                 <TextBlock Grid.Column="2" Classes="muted" FontSize="11" Text="{Binding TimeText}" VerticalAlignment="Bottom" HorizontalAlignment="Right" />
                 <TextBlock Grid.Row="1" Grid.Column="1" Margin="10,1,6,0" Classes="muted" FontSize="13"
                            Text="{Binding Preview}" TextTrimming="CharacterEllipsis" VerticalAlignment="Top" />
@@ -97,43 +113,103 @@
       <TextBlock Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center"
                  Text="Pick a contact, or add one on the left." IsVisible="{Binding !HasSelection}" />
 
-      <DockPanel IsVisible="{Binding HasSelection}">
-        <Border DockPanel.Dock="Top" Padding="20,12" BorderThickness="0,0,0,1"
-                BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
-          <Grid ColumnDefinitions="*,Auto">
-            <StackPanel>
-              <TextBlock Text="{Binding Selected.Username, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
-              <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" />
-            </StackPanel>
-            <Button Grid.Column="1" Content="Trust new key" Command="{Binding TrustNewKeyCommand}" Background="#D13438" Foreground="White"
-                    IsVisible="{Binding Selected.IdentityChanged, FallbackValue=False}" />
+      <Panel IsVisible="{Binding HasSelection}">
+        <DockPanel>
+          <Border DockPanel.Dock="Top" Padding="20,12" BorderThickness="0,0,0,1"
+                  BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding Selected.Username, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
+                  <Border Classes="badge verified" IsVisible="{Binding Selected.Verified, FallbackValue=False}" VerticalAlignment="Center">
+                    <TextBlock Text="✓ Verified" />
+                  </Border>
+                </StackPanel>
+                <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" />
+              </StackPanel>
+              <Button Name="SafetyButton" Grid.Column="1" Content="Safety number" Command="{Binding ShowSafetyNumberCommand}"
+                      IsVisible="{Binding CanCompose}" VerticalAlignment="Center" />
+            </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="#FDE7E9" Padding="20,10"
+                  IsVisible="{Binding Selected.IdentityChanged, FallbackValue=False}">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel Spacing="2">
+                <TextBlock Text="Safety number changed" FontWeight="SemiBold" Foreground="#A4262C" />
+                <TextBlock TextWrapping="Wrap" Foreground="#3B0A0D" FontSize="13"
+                           Text="Their identity key is not the one you trusted. They may have reinstalled, or someone may be impersonating them. New messages from them are on hold and sending is paused until you review it." />
+              </StackPanel>
+              <Button Name="ReviewKeyButton" Grid.Column="1" Content="Review" Command="{Binding ShowSafetyNumberCommand}"
+                      Background="#D13438" Foreground="White" Margin="12,0,0,0" VerticalAlignment="Center" />
+            </Grid>
+          </Border>
+
+          <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
+            <TextBox Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
+              <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+              </TextBox.KeyBindings>
+            </TextBox>
+            <Button Grid.Column="2" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
           </Grid>
+
+          <ScrollViewer Name="MessageScroller" Padding="20,10">
+            <ItemsControl ItemsSource="{Binding Messages}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="vm:MessageViewModel">
+                  <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}">
+                    <StackPanel>
+                      <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
+                      <TextBlock Classes="meta" Text="{Binding MetaText}" />
+                    </StackPanel>
+                  </Border>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+
+        <!-- Safety number panel, over the conversation -->
+        <Border Background="#99000000" IsVisible="{Binding IsSafetyOpen}">
+          <Border Width="440" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Background="{DynamicResource SystemControlBackgroundAltHighBrush}" DataContext="{Binding Safety}"
+                  x:DataType="vm:SafetyNumberViewModel">
+            <StackPanel Spacing="16">
+              <TextBlock Classes="title" FontSize="20" Text="Safety number" IsVisible="{Binding IsCurrentKey}" />
+              <TextBlock Classes="title" FontSize="20" Text="New safety number" Foreground="#A4262C" IsVisible="{Binding IsKeyChange}" />
+              <TextBlock TextWrapping="Wrap" Text="{Binding Explanation}" />
+              <Border Padding="16,12" CornerRadius="8" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}">
+                <ItemsControl ItemsSource="{Binding Rows}" HorizontalAlignment="Center">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <TextBlock Text="{Binding}" FontFamily="Menlo, Consolas, monospace" FontSize="20" Margin="0,3"
+                                 HorizontalAlignment="Center" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </Border>
+
+              <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" IsVisible="{Binding IsUnverified}">
+                <Button Content="Close" Command="{Binding CloseCommand}" />
+                <Button Name="MarkVerifiedButton" Content="Mark as verified" Command="{Binding MarkVerifiedCommand}" Classes="accent" />
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" IsVisible="{Binding IsVerified}">
+                <Button Content="Clear verification" Command="{Binding ClearVerifiedCommand}" />
+                <Button Content="Close" Command="{Binding CloseCommand}" Classes="accent" />
+              </StackPanel>
+              <StackPanel Spacing="8" IsVisible="{Binding IsKeyChange}">
+                <Button Name="TrustVerifyButton" Content="The numbers match: trust and mark verified" Command="{Binding TrustAndVerifyCommand}"
+                        Classes="accent" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Content="Trust without verifying" Command="{Binding TrustWithoutVerifyingCommand}"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Content="Not now" Command="{Binding CloseCommand}"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
         </Border>
-
-        <Grid DockPanel.Dock="Bottom" ColumnDefinitions="*,8,Auto" Margin="16,8,16,16">
-          <TextBox Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap">
-            <TextBox.KeyBindings>
-              <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
-            </TextBox.KeyBindings>
-          </TextBox>
-          <Button Grid.Column="2" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
-        </Grid>
-
-        <ScrollViewer Name="MessageScroller" Padding="20,10">
-          <ItemsControl ItemsSource="{Binding Messages}">
-            <ItemsControl.ItemTemplate>
-              <DataTemplate DataType="vm:MessageViewModel">
-                <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}">
-                  <StackPanel>
-                    <SelectableTextBlock Text="{Binding Text}" TextWrapping="Wrap" />
-                    <TextBlock Classes="meta" Text="{Binding MetaText}" />
-                  </StackPanel>
-                </Border>
-              </DataTemplate>
-            </ItemsControl.ItemTemplate>
-          </ItemsControl>
-        </ScrollViewer>
-      </DockPanel>
+      </Panel>
     </DockPanel>
   </Grid>
 </UserControl>

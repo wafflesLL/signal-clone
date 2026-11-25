@@ -13,7 +13,11 @@ public enum MessageStatus { Pending, Sent, Received, Failed }
 
 public sealed record StoredMessage(long Id, string Peer, bool Outgoing, string Text, DateTimeOffset SentAt, MessageStatus Status);
 
-public sealed record Contact(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, DateTimeOffset AddedAt);
+/// <param name="Verified">The user compared safety numbers with this contact and confirmed them.</param>
+/// <param name="IdentityChanged">Someone presented a different identity key for this contact. Their
+/// messages are held and sending is blocked until the user checks and trusts a key.</param>
+public sealed record Contact(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, DateTimeOffset AddedAt,
+    bool Verified = false, bool IdentityChanged = false);
 
 /// <summary>One Double Ratchet session with a peer. PendingInitial is resent with every
 /// outgoing message until the peer's first reply arrives on this session.</summary>
@@ -56,6 +60,18 @@ internal sealed class LocalStore : IDisposable
             CREATE TABLE IF NOT EXISTS outbox (message_id INTEGER PRIMARY KEY, peer TEXT NOT NULL, envelope BLOB NOT NULL);
             CREATE TABLE IF NOT EXISTS processed (server_id INTEGER PRIMARY KEY, outcome TEXT NOT NULL);
             """);
+        Migrate();
+    }
+
+    /// <summary>Adds columns introduced after a profile was created.</summary>
+    private void Migrate()
+    {
+        var columns = new HashSet<string>();
+        using (var cmd = Cmd("SELECT name FROM pragma_table_info('contacts')"))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(0));
+        if (!columns.Contains("verified")) Exec("ALTER TABLE contacts ADD COLUMN verified INTEGER NOT NULL DEFAULT 0");
+        if (!columns.Contains("identity_changed")) Exec("ALTER TABLE contacts ADD COLUMN identity_changed INTEGER NOT NULL DEFAULT 0");
     }
 
     public void Dispose()
@@ -157,23 +173,29 @@ internal sealed class LocalStore : IDisposable
         Exec("DELETE FROM prekeys WHERE kind = $k AND id = $i", ("$k", kind), ("$i", (long)id));
 
     // ------------------------------------------------------------ contacts
+    private const string ContactColumns = "username, sig_pub, dh_pub, added_at, verified, identity_changed";
+
+    private static Contact ReadContact(SqliteDataReader r) =>
+        new(r.GetString(0), (byte[])r[1], (byte[])r[2], FromMs(r.GetInt64(3)), r.GetInt64(4) == 1, r.GetInt64(5) == 1);
+
     public Contact? GetContact(string username)
     {
-        using var cmd = Cmd("SELECT sig_pub, dh_pub, added_at FROM contacts WHERE username = $u", ("$u", username));
+        using var cmd = Cmd($"SELECT {ContactColumns} FROM contacts WHERE username = $u", ("$u", username));
         using var r = cmd.ExecuteReader();
-        return r.Read() ? new Contact(username, (byte[])r[0], (byte[])r[1], FromMs(r.GetInt64(2))) : null;
+        return r.Read() ? ReadContact(r) : null;
     }
 
     public void PutContact(Contact c) =>
-        Exec("INSERT OR REPLACE INTO contacts VALUES ($u, $s, $d, $t)",
-            ("$u", c.Username), ("$s", c.IdentitySigPub), ("$d", c.IdentityDhPub), ("$t", Ms(c.AddedAt)));
+        Exec($"INSERT OR REPLACE INTO contacts ({ContactColumns}) VALUES ($u, $s, $d, $t, $v, $c)",
+            ("$u", c.Username), ("$s", c.IdentitySigPub), ("$d", c.IdentityDhPub), ("$t", Ms(c.AddedAt)),
+            ("$v", c.Verified ? 1 : 0), ("$c", c.IdentityChanged ? 1 : 0));
 
     public List<Contact> Contacts()
     {
-        using var cmd = Cmd("SELECT username, sig_pub, dh_pub, added_at FROM contacts ORDER BY username");
+        using var cmd = Cmd($"SELECT {ContactColumns} FROM contacts ORDER BY username");
         using var r = cmd.ExecuteReader();
         var list = new List<Contact>();
-        while (r.Read()) list.Add(new Contact(r.GetString(0), (byte[])r[1], (byte[])r[2], FromMs(r.GetInt64(3))));
+        while (r.Read()) list.Add(ReadContact(r));
         return list;
     }
 

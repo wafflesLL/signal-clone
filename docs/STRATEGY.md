@@ -68,8 +68,8 @@ use AI), and a Canvas comment about AI use.
 | Project | Role | Status |
 |---|---|---|
 | `E2ee.Core` | Protocol library: `Primitives.cs` (NSec + .NET BCL wrappers), `X3dh.cs`, `Ratchet.cs`. | Implemented; RFC vectors and protocol tests pass. |
-| `E2ee.Messaging` | Session layer shared by the app and CLI: account setup, prekey upload and refill, contact list, session manager (first message vs. ongoing), local storage, relay client, safety numbers. | Done except safety numbers (milestone 5). |
-| `E2ee.Server` | ASP.NET Core and SQLite relay: accounts, bundle store, inbox queues, real-time push. | Accounts, signed-request auth, and acknowledged inboxes done; push is milestone 5. |
+| `E2ee.Messaging` | Session layer shared by the app and CLI: account setup, prekey upload and refill, contact list, session manager (first message vs. ongoing), local storage, relay client, safety numbers. | Done. |
+| `E2ee.Server` | ASP.NET Core and SQLite relay: accounts, bundle store, inbox queues, real-time push. | Done: accounts, signed-request auth, acknowledged inboxes, long-poll push. |
 | `E2ee.App` | Avalonia desktop app: onboarding, contact list, chat view, safety-number screen, settings. | Sign-up, contacts, chat, unread badges, relay status, and identity-change warning done; safety numbers and settings are milestone 5. |
 | `E2ee.Client` | Headless CLI over `E2ee.Messaging`, for scripted demos and integration tests. | Done. |
 
@@ -86,10 +86,21 @@ MVVM pattern, which keeps the UI testable and thin. We considered .NET MAUI, whi
 reaches iOS and Android, but on macOS it needs Xcode and Mac Catalyst workloads and it has
 no Linux target. Mobile is out of scope; the report's §5 can discuss it.
 
-**Real-time delivery.** First version: the app polls its inbox every couple of seconds,
-which is simple and good enough at chat speeds. Upgrade: a SignalR (WebSocket) channel
-that pushes a "you have mail" notification. Messages are still fetched over the same
-authenticated endpoint, so push carries no message content.
+**Real-time delivery.** Long polling: the client holds a signed `GET /v1/messages/wait`
+open for up to 20 seconds, and the relay answers the moment mail arrives. The answer is
+only "you have mail" with no content; the client then fetches it from the normal signed
+endpoint. The client passes the highest inbox id it has seen, so mail it is holding (see
+Sessions) doesn't wake it again. We planned SignalR (WebSockets), but its handshake can't
+easily carry our per-request signatures, so it would have needed a second authentication
+scheme. Long polling delivers just as instantly at chat scale and reuses the one we have.
+
+**Safety numbers.** 60 digits computed from both identities, following Signal's
+fingerprint format (iterated SHA-512 over each party's keys and username; the two halves
+are sorted so both sides see the same number). The app and the CLI show them. Marking a
+contact verified is stored locally. A key change clears it, raises a warning, pauses
+sending, and holds the contact's new messages on the relay (unacknowledged) until the user
+reviews the new number and trusts the key. The user trusts exactly the key they reviewed,
+not whatever the relay holds at that moment.
 
 **Relay authentication.** Usernames are bound to an Ed25519 identity key on first
 registration (trust on first use at the server). Every request is signed with that key over
@@ -117,6 +128,12 @@ relay has registered for the sender, and a known contact whose key changes is re
 until the user runs `trust`.
 
 **Known deviations from Signal:**
+- Safety numbers cover both of our identity keys (Ed25519 and X25519) and use their own
+  version tag, so they're not comparable with Signal's.
+- After a key change Signal shows the new messages with a warning. We hold them until the
+  user decides. That's stricter, but someone who reinstalls is unreadable until the other
+  person reviews the new key.
+- Push is long polling, not a persistent socket (see Real-time delivery).
 - The relay authenticates clients with signatures from the identity key instead of a
   password, so one key does both jobs. Simpler, but compromising the identity key also lets
   an attacker read (still encrypted) inbox traffic.
@@ -137,7 +154,7 @@ Dates are relative to the start. Adjust them once the due date is known.
 | 2 | 1–2 | **Double Ratchet**: ping-pong, out-of-order delivery, dropped messages, MAX_SKIP, tamper and replay rejection, state rollback on failure. | 3, 4 | Done |
 | 3 | 2–3 | **Session layer and authenticated relay**: `E2ee.Messaging` with persistent encrypted local state, account registration, signed relay requests, prekey refill. The CLI rebuilt on it: two terminals on two machines chatting, surviving restarts. | 3, 4 | Done (tested on one machine; try two machines on a LAN) |
 | 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | Done; tested headlessly. Still to do: a hands-on run on macOS and Windows, and two laptops |
-| 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | |
+| 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | Done, with long polling instead of SignalR. Builds are made by `scripts/package-app.sh` but not yet attached to a GitHub release. Not yet tested on a real screen or on Windows |
 | 6 | 4–5 | **Security demos** in tests and a scripted CLI demo: forward secrecy, post-compromise security, server-only-sees-ciphertext. Run a small usability check with a few classmates. | 4 | |
 | 7 | 5 | **Stretch**: attachments (encrypt the file, send the key in a message), then group messaging (sender keys). | 4, 5 | |
 | 8 | 5–6 | Report writing, figures and screenshots, artifact zip, transcripts. | all | |
@@ -151,7 +168,8 @@ Signal doesn't publish official X3DH or Double Ratchet test vectors, so the emai
 "test against known test vectors" becomes five layers:
 
 1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in
-   `tests/E2ee.Tests/PrimitivesTests.cs` and pass.
+   `tests/E2ee.Tests/PrimitivesTests.cs` and pass. Safety numbers are checked against a
+   separate Python implementation (`scripts/safety_number_crosscheck.py`).
 2. **Protocol known-answer and interop**: fix every private key, then compare our SK and
    message keys against an independent implementation, such as the `x3dh` and
    `doubleratchet` PyPI packages (or libsignal) configured with the same KDF parameters,
@@ -182,7 +200,9 @@ trusts a plain statement like that more than an overclaim.
   whom and when) stays visible to the relay.
 - **Active attacker at the relay**: show that a relay that swaps in its own prekey bundle
   is caught when the users compare safety numbers, and that the app warns when a known
-  contact's identity key changes.
+  contact's identity key changes. Already covered by tests (`RelaySwappingIdentityKeyIsDetected`,
+  `TrustUsesTheReviewedKeyNotTheRelaysLatest`, `ReviewAndTrustAChangedKey`); milestone 6
+  turns them into a scripted demo.
 - **Usability**: a short task-based check with a few classmates (install, add a contact,
   send a message, verify a safety number). Note where people got stuck. That goes in §4
   and §5.

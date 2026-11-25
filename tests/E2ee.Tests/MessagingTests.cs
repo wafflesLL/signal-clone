@@ -217,19 +217,154 @@ public sealed class MessagingTests : IDisposable
         Assert.Throws<ProfileInUseException>(() => _relay.Open("alice"));
     }
 
+    /// <summary>Simulates bob losing his device: the relay forgets him and a new install claims the name.</summary>
+    private async Task<Messenger> ReinstallBob()
+    {
+        await using (var c = new SqliteConnection($"Data Source={_relay.RelayDbPath};Pooling=False"))
+        {
+            await c.OpenAsync();
+            var cmd = c.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM accounts WHERE username = 'bob';
+                DELETE FROM signed_prekeys WHERE username = 'bob';
+                DELETE FROM one_time_prekeys WHERE username = 'bob';
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+        var newBob = _relay.Open("bob-reinstalled");
+        await newBob.RegisterAsync("bob");
+        return newBob;
+    }
+
     [Fact]
-    public async Task TrustNewIdentityAfterReinstall()
+    public async Task BothSidesComputeTheSameSafetyNumber()
     {
         var alice = await _relay.Register("alice");
         var bob = await _relay.Register("bob");
         await alice.SendAsync("bob", "hi");
         Assert.Single(await Receive(bob));
+        Assert.Equal(await alice.SafetyNumberAsync("bob"), await bob.SafetyNumberAsync("alice"));
 
-        // Alice accepts the relay's current key for bob (here unchanged) and starts fresh.
-        await alice.TrustNewIdentityAsync("bob");
-        await alice.SendAsync("bob", "new session");
-        Assert.Equal(["alice: new session"], await Receive(bob));
-        await bob.SendAsync("alice", "still works");
-        Assert.Equal(["bob: still works"], await Receive(alice));
+        Assert.False(alice.GetContact("bob")!.Verified);
+        await alice.SetVerifiedAsync("bob", true);
+        Assert.True(alice.GetContact("bob")!.Verified);
+    }
+
+    [Fact]
+    public async Task KeyChangeHoldsMessagesUntilTrusted()
+    {
+        var alice = await _relay.Register("alice");
+        var bob = await _relay.Register("bob");
+        await alice.SendAsync("bob", "hi bob");
+        Assert.Single(await Receive(bob));
+        await alice.SetVerifiedAsync("bob", true);
+
+        var newBob = await ReinstallBob();
+        await newBob.SendAsync("alice", "it's me, new phone");
+
+        // Alice holds the message, flags bob, and clears the verified mark.
+        var sync = await alice.SyncAsync();
+        Assert.Empty(sync.Received);
+        Assert.Equal(["bob"], sync.IdentityChanges);
+        var flagged = alice.GetContact("bob")!;
+        Assert.True(flagged.IdentityChanged);
+        Assert.False(flagged.Verified);
+        Assert.Single(alice.History("bob")); // only "hi bob"
+        await Assert.ThrowsAsync<IdentityChangedException>(() => alice.SendAsync("bob", "are you there?"));
+
+        // A second sync doesn't report it again, and the message is still waiting on the relay.
+        var again = await alice.SyncAsync();
+        Assert.Empty(again.IdentityChanges);
+        Assert.Empty(again.Received);
+
+        // Alice reviews the new key: its safety number is the one new-bob sees.
+        var check = await alice.CheckIdentityAsync("bob");
+        Assert.False(check.MatchesTrustedKey);
+        Assert.Equal(await newBob.SafetyNumberAsync("alice"), check.SafetyNumber);
+
+        await alice.TrustIdentityAsync(check, verified: true);
+        Assert.Equal(["bob: it's me, new phone"], await Receive(alice));
+        Assert.True(alice.GetContact("bob")!.Verified);
+
+        await alice.SendAsync("bob", "welcome back");
+        Assert.Equal(["alice: welcome back"], await Receive(newBob));
+    }
+
+    [Fact]
+    public async Task TrustUsesTheReviewedKeyNotTheRelaysLatest()
+    {
+        var alice = await _relay.Register("alice");
+        await _relay.Register("bob");
+        await alice.AddContactAsync("bob");
+        var newBob = await ReinstallBob();
+        await newBob.SendAsync("alice", "hello");
+        await alice.SyncAsync();
+        var check = await alice.CheckIdentityAsync("bob");
+
+        // Between review and trust, the relay swaps bob's key again.
+        var (_, bundles) = X3dh.GeneratePrekeys(X3dh.GenerateIdentity(), 1);
+        await using (var c = new SqliteConnection($"Data Source={_relay.RelayDbPath};Pooling=False"))
+        {
+            await c.OpenAsync();
+            var cmd = c.CreateCommand();
+            cmd.CommandText = "UPDATE accounts SET sig_pub = $s, dh_pub = $d WHERE username = 'bob'";
+            cmd.Parameters.AddWithValue("$s", bundles[0].IdentitySigPub);
+            cmd.Parameters.AddWithValue("$d", bundles[0].IdentityDhPub);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var trusted = await alice.TrustIdentityAsync(check);
+        Assert.Equal(check.IdentitySigPub, trusted.IdentitySigPub); // the key alice saw, not the swapped one
+        Assert.Equal(["bob: hello"], await Receive(alice));
+    }
+
+    [Fact]
+    public async Task WaitReturnsAsSoonAsMailArrives()
+    {
+        var alice = await _relay.Register("alice");
+        var bob = await _relay.Register("bob");
+
+        var started = DateTimeOffset.UtcNow;
+        var wait = bob.WaitForMessagesAsync(TimeSpan.FromSeconds(20));
+        await Task.Delay(300);
+        Assert.False(wait.IsCompleted);
+        await alice.SendAsync("bob", "ping");
+        Assert.True(await wait);
+        Assert.True(DateTimeOffset.UtcNow - started < TimeSpan.FromSeconds(5));
+        Assert.Equal(["alice: ping"], await Receive(bob));
+    }
+
+    [Fact]
+    public async Task WaitTimesOutWhenThereIsNoNewMail()
+    {
+        var bob = await _relay.Register("bob");
+        Assert.False(await bob.WaitForMessagesAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task WaitIgnoresMessagesOnHold()
+    {
+        var alice = await _relay.Register("alice");
+        await _relay.Register("bob");
+        await alice.AddContactAsync("bob");
+        var newBob = await ReinstallBob();
+        await newBob.SendAsync("alice", "held");
+        await alice.SyncAsync(); // held: stays on the relay
+
+        // Without the "after" marker this would return immediately forever.
+        Assert.False(await alice.WaitForMessagesAsync(TimeSpan.FromSeconds(1)));
+    }
+
+    [Fact]
+    public async Task SendingDoesNotWaitForAPendingPush()
+    {
+        var alice = await _relay.Register("alice");
+        var bob = await _relay.Register("bob");
+        var wait = alice.WaitForMessagesAsync(TimeSpan.FromSeconds(20));
+        var send = alice.SendAsync("bob", "not blocked by the open wait");
+        Assert.Same(send, await Task.WhenAny(send, Task.Delay(5000)));
+        Assert.Single(await Receive(bob));
+        await bob.SendAsync("alice", "done");
+        Assert.True(await wait);
     }
 }

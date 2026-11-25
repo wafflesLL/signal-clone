@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using Avalonia.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using E2ee.Messaging;
@@ -10,9 +9,11 @@ namespace E2ee.App.ViewModels;
 /// Every action goes through <see cref="Messenger"/>; nothing here touches crypto.</summary>
 public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase, IDisposable
 {
-    public static readonly TimeSpan PollInterval = TimeSpan.FromSeconds(2);
+    /// <summary>How long one push wait may stay open on the relay.</summary>
+    public static readonly TimeSpan PushWait = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan MaxBackoff = TimeSpan.FromSeconds(30);
 
-    private DispatcherTimer? _timer;
+    private readonly CancellationTokenSource _stop = new();
     private bool _syncing;
 
     public string Me => messenger.Username!;
@@ -22,11 +23,14 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     public ObservableCollection<MessageViewModel> Messages { get; } = new();
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasSelection))]
-    [NotifyCanExecuteChangedFor(nameof(SendCommand), nameof(TrustNewKeyCommand))]
+    [NotifyPropertyChangedFor(nameof(HasSelection), nameof(CanCompose))]
+    [NotifyCanExecuteChangedFor(nameof(SendCommand), nameof(ShowSafetyNumberCommand))]
     private ContactViewModel? _selected;
 
     public bool HasSelection => Selected is not null;
+
+    /// <summary>False while the open contact's key change is unresolved.</summary>
+    public bool CanCompose => Selected is { IdentityChanged: false };
 
     [ObservableProperty]
     [NotifyCanExecuteChangedFor(nameof(SendCommand))]
@@ -45,23 +49,55 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     [ObservableProperty] private bool _relayOnline = true;
 
-    public async Task StartAsync(bool poll = true)
+    /// <summary>The safety-number panel, when open.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsSafetyOpen))]
+    private SafetyNumberViewModel? _safety;
+
+    public bool IsSafetyOpen => Safety is not null;
+
+    public async Task StartAsync(bool push = true)
     {
         foreach (var c in await messenger.ConversationsAsync())
-            Contacts.Add(new ContactViewModel(c.Contact.Username, c.Last));
+            Contacts.Add(new ContactViewModel(c.Contact, c.Last));
         await SyncNowAsync();
-        if (poll)
-        {
-            _timer = new DispatcherTimer { Interval = PollInterval };
-            _timer.Tick += async (_, _) => await SyncNowAsync();
-            _timer.Start();
-        }
+        if (push) _ = PushLoopAsync(_stop.Token);
     }
 
     public void Dispose()
     {
-        _timer?.Stop();
+        _stop.Cancel();
         messenger.Dispose();
+    }
+
+    /// <summary>
+    /// Holds a wait open on the relay, which answers the moment mail arrives, then syncs.
+    /// Also syncs at least every <see cref="PushWait"/>, which retries queued messages.
+    /// Backs off while the relay is unreachable.
+    /// </summary>
+    private async Task PushLoopAsync(CancellationToken ct)
+    {
+        var backoff = TimeSpan.FromSeconds(1);
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                await messenger.WaitForMessagesAsync(PushWait, ct);
+                backoff = TimeSpan.FromSeconds(1);
+            }
+            catch (RelayException)
+            {
+                RelayOnline = false;
+                try { await Task.Delay(backoff, ct); } catch (OperationCanceledException) { return; }
+                backoff = TimeSpan.FromTicks(Math.Min(backoff.Ticks * 2, MaxBackoff.Ticks));
+            }
+            catch (Exception) when (ct.IsCancellationRequested)
+            {
+                return; // the app is closing
+            }
+            if (ct.IsCancellationRequested) return;
+            await SyncNowAsync();
+        }
     }
 
     partial void OnSelectedChanged(ContactViewModel? value) => _ = LoadConversationAsync(value);
@@ -69,6 +105,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     private async Task LoadConversationAsync(ContactViewModel? contact)
     {
         Messages.Clear();
+        Safety = null;
         if (contact is null) return;
         contact.Unread = 0;
         var history = await messenger.HistoryAsync(contact.Username, 200);
@@ -77,7 +114,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         foreach (var m in history) Messages.Add(new MessageViewModel(m));
     }
 
-    private bool CanSend() => Selected is not null && !string.IsNullOrWhiteSpace(Draft);
+    private bool CanSend() => CanCompose && !string.IsNullOrWhiteSpace(Draft);
 
     [RelayCommand(CanExecute = nameof(CanSend))]
     private async Task SendAsync()
@@ -93,11 +130,9 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             MoveToTop(peer);
             RelayOnline = msg.Status != MessageStatus.Pending;
         }
-        catch (IdentityChangedException e)
+        catch (IdentityChangedException)
         {
-            peer.IdentityChanged = true;
-            TrustNewKeyCommand.NotifyCanExecuteChanged();
-            Notice = e.Message;
+            MarkIdentityChanged(peer.Username);
             Draft = text;
         }
         catch (RelayException e) when (e.Status is null)
@@ -128,7 +163,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         try
         {
             var contact = await messenger.AddContactAsync(name);
-            var vm = new ContactViewModel(contact.Username);
+            var vm = new ContactViewModel(contact);
             Contacts.Insert(0, vm);
             Selected = vm;
             NewContact = "";
@@ -144,18 +179,25 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         }
     }
 
-    private bool CanTrust() => Selected?.IdentityChanged == true;
+    // ---------------------------------------------------------------- safety numbers
 
-    [RelayCommand(CanExecute = nameof(CanTrust))]
-    private async Task TrustNewKeyAsync()
+    private bool CanShowSafetyNumber() => Selected is not null;
+
+    /// <summary>Opens the panel: the current number, or, after a key change, the new key's number to review.</summary>
+    [RelayCommand(CanExecute = nameof(CanShowSafetyNumber))]
+    private async Task ShowSafetyNumberAsync()
     {
         var peer = Selected!;
         try
         {
-            await messenger.TrustNewIdentityAsync(peer.Username);
-            peer.IdentityChanged = false;
-            TrustNewKeyCommand.NotifyCanExecuteChanged();
-            Notice = $"Now trusting {peer.Username}'s new key. Your next message starts a fresh session.";
+            Safety = peer.IdentityChanged
+                ? SafetyNumberViewModel.ForKeyChange(this, peer, await messenger.CheckIdentityAsync(peer.Username))
+                : SafetyNumberViewModel.ForCurrentKey(this, peer, await messenger.SafetyNumberAsync(peer.Username));
+        }
+        catch (RelayException e) when (e.Status is null)
+        {
+            RelayOnline = false;
+            Notice = "Can't reach the relay to fetch the new key. Try again when it's back.";
         }
         catch (Exception e) when (e is MessengerException or RelayException)
         {
@@ -163,8 +205,57 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         }
     }
 
+    internal async Task SetVerifiedAsync(ContactViewModel peer, bool verified)
+    {
+        try
+        {
+            await messenger.SetVerifiedAsync(peer.Username, verified);
+            peer.Verified = verified;
+            Safety = null;
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            Notice = e.Message;
+        }
+    }
+
+    internal async Task TrustAsync(ContactViewModel peer, IdentityCheck check, bool verified)
+    {
+        try
+        {
+            await messenger.TrustIdentityAsync(check, verified);
+            peer.IdentityChanged = false;
+            peer.Verified = verified;
+            Safety = null;
+            Notice = null;
+            OnPropertyChanged(nameof(CanCompose));
+            SendCommand.NotifyCanExecuteChanged();
+            await SyncNowAsync(); // release messages that were on hold
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            Notice = e.Message;
+        }
+    }
+
+    internal void CloseSafety() => Safety = null;
+
+    private void MarkIdentityChanged(string username)
+    {
+        if (Contacts.FirstOrDefault(c => c.Username == username) is not { } c) return;
+        c.IdentityChanged = true;
+        c.Verified = false;
+        if (c == Selected)
+        {
+            OnPropertyChanged(nameof(CanCompose));
+            SendCommand.NotifyCanExecuteChanged();
+        }
+    }
+
     [RelayCommand]
     private void DismissNotice() => Notice = null;
+
+    // ---------------------------------------------------------------- delivery
 
     /// <summary>One round of delivery: retry queued messages, fetch new ones, update the screen.</summary>
     public async Task SyncNowAsync()
@@ -188,7 +279,9 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
                 if (Selected == contact) Messages.Add(new MessageViewModel(msg));
                 else contact.Unread++;
             }
-            if (result.Problems.Count > 0) Notice = string.Join("\n", result.Problems);
+            foreach (var user in result.IdentityChanges) MarkIdentityChanged(user);
+            var problems = result.Problems.Where(p => !result.IdentityChanges.Any(u => p.StartsWith(u + "'s safety number"))).ToList();
+            if (problems.Count > 0) Notice = string.Join("\n", problems);
             if (Messages.Any(m => m.IsPending) && Selected is { } open) await RefreshStatusesAsync(open);
         }
         catch (RelayException)
@@ -218,4 +311,53 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         var i = Contacts.IndexOf(c);
         if (i > 0) Contacts.Move(i, 0);
     }
+}
+
+/// <summary>
+/// The safety-number panel. Normally it shows the number for the key you trust, with
+/// "Mark as verified". After a key change it shows the number for the relay's new key,
+/// and trusting it is an explicit choice.
+/// </summary>
+public sealed partial class SafetyNumberViewModel : ViewModelBase
+{
+    private readonly ShellViewModel _shell;
+    private readonly IdentityCheck? _check;
+
+    private SafetyNumberViewModel(ShellViewModel shell, ContactViewModel peer, string number, IdentityCheck? check)
+    {
+        _shell = shell;
+        Peer = peer;
+        _check = check;
+        var groups = number.Split(' ');
+        Rows = [string.Join("  ", groups[..4]), string.Join("  ", groups[4..8]), string.Join("  ", groups[8..])];
+    }
+
+    public static SafetyNumberViewModel ForCurrentKey(ShellViewModel shell, ContactViewModel peer, string number) =>
+        new(shell, peer, number, null);
+
+    public static SafetyNumberViewModel ForKeyChange(ShellViewModel shell, ContactViewModel peer, IdentityCheck check) =>
+        new(shell, peer, check.SafetyNumber, check);
+
+    public ContactViewModel Peer { get; }
+
+    /// <summary>The 60 digits as three rows of four groups.</summary>
+    public string[] Rows { get; }
+
+    public bool IsKeyChange => _check is not null;
+    public bool IsCurrentKey => !IsKeyChange;
+    public bool IsVerified => IsCurrentKey && Peer.Verified;
+    public bool IsUnverified => IsCurrentKey && !Peer.Verified;
+
+    public string Explanation => IsKeyChange
+        ? $"{Peer.Username}'s identity key changed. This is the safety number for the new key. Compare it with the one " +
+          $"{Peer.Username} sees, in person or on a call. If they match, trust the new key. If not, someone may be " +
+          "impersonating them: don't trust it."
+        : $"Compare these numbers with the ones {Peer.Username} sees on their screen, in person or on a call. If they " +
+          "match, your conversation is end-to-end encrypted with no one in the middle.";
+
+    [RelayCommand] private Task MarkVerifiedAsync() => _shell.SetVerifiedAsync(Peer, true);
+    [RelayCommand] private Task ClearVerifiedAsync() => _shell.SetVerifiedAsync(Peer, false);
+    [RelayCommand] private Task TrustAndVerifyAsync() => _shell.TrustAsync(Peer, _check!, verified: true);
+    [RelayCommand] private Task TrustWithoutVerifyingAsync() => _shell.TrustAsync(Peer, _check!, verified: false);
+    [RelayCommand] private void Close() => _shell.CloseSafety();
 }

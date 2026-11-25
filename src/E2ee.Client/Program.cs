@@ -16,7 +16,9 @@ const string Usage = """
       send <username> <text...>  send one message
       sync                       fetch and print new messages
       history <username> [n]     show the last n messages (default 20)
-      trust <username>           accept a contact's new identity key (check with them first)
+      safety <username>          show the safety number to compare with a contact
+      verify <username>          mark a contact verified after comparing safety numbers
+      trust <username>           review and accept a contact's new identity key
       chat <username>            interactive chat; type /quit to leave
 
     options:
@@ -87,6 +89,7 @@ try
             var result = await m.SyncAsync();
             foreach (var msg in result.Received) PrintMessage(msg);
             foreach (var p in result.Problems) Console.Error.WriteLine($"! {p}");
+            foreach (var u in result.IdentityChanges) Console.Error.WriteLine($"! run 'trust {u}' after checking with them");
             if (result.Received.Count == 0) Console.WriteLine("No new messages.");
             break;
 
@@ -95,10 +98,44 @@ try
             foreach (var msg in m.History(Arg(0, "username"), n)) PrintMessage(msg);
             break;
 
-        case "trust":
-            await m.TrustNewIdentityAsync(Arg(0, "username"));
-            Console.WriteLine($"Now trusting {argv[0]}'s current identity key. Old sessions were dropped.");
+        case "safety":
+        {
+            var peer = Arg(0, "username");
+            var c = m.GetContact(peer) ?? throw new MessengerException($"{peer} is not a contact; run: add {peer}");
+            if (c.IdentityChanged) throw new IdentityChangedException(peer);
+            PrintSafetyNumber(await m.SafetyNumberAsync(peer));
+            Console.WriteLine(c.Verified ? $"{peer} is verified." : $"Not verified. After comparing with {peer}, run: verify {peer}");
             break;
+        }
+
+        case "verify":
+        {
+            var peer = Arg(0, "username");
+            PrintSafetyNumber(await m.SafetyNumberAsync(peer));
+            if (!Confirm($"Does {peer} see exactly these numbers?")) { Console.WriteLine("Not verified."); break; }
+            await m.SetVerifiedAsync(peer, true);
+            Console.WriteLine($"{peer} is verified.");
+            break;
+        }
+
+        case "trust":
+        {
+            var peer = Arg(0, "username");
+            var check = await m.CheckIdentityAsync(peer);
+            if (check.MatchesTrustedKey && m.GetContact(peer) is { IdentityChanged: false })
+            {
+                Console.WriteLine($"{peer}'s key hasn't changed; nothing to do.");
+                break;
+            }
+            Console.WriteLine($"Safety number for {peer}'s new key:");
+            PrintSafetyNumber(check.SafetyNumber);
+            Console.WriteLine($"Compare it with {peer} in person or on a call. If it doesn't match, someone may be impersonating them.");
+            if (!Confirm("Trust this key?")) { Console.WriteLine("Not trusted. Their messages stay on hold."); break; }
+            var verified = Confirm($"Did you compare it with {peer} and it matched (mark verified)?");
+            await m.TrustIdentityAsync(check, verified);
+            Console.WriteLine($"Now trusting {peer}'s new key{(verified ? " (verified)" : "")}. Run sync to read held messages.");
+            break;
+        }
 
         case "chat":
             await Chat(m, Arg(0, "username"));
@@ -120,6 +157,18 @@ static void WarnIfPlainHttp(Uri server)
 {
     if (server.Scheme == "http" && !server.IsLoopback)
         Console.Error.WriteLine("warning: the relay uses plain HTTP. Messages stay end-to-end encrypted, but anyone on the network can see who talks to whom.");
+}
+
+static void PrintSafetyNumber(string number)
+{
+    var g = number.Split(' ');
+    for (var row = 0; row < 3; row++) Console.WriteLine("    " + string.Join("  ", g[(row * 4)..(row * 4 + 4)]));
+}
+
+static bool Confirm(string question)
+{
+    Console.Write($"{question} [y/N] ");
+    return Console.ReadLine()?.Trim().ToLowerInvariant() is "y" or "yes";
 }
 
 static void PrintMessage(StoredMessage msg)
@@ -153,6 +202,7 @@ static async Task Chat(Messenger m, string peer)
                 foreach (var msg in result.Received)
                     Print(msg.Peer == peer ? $"[{msg.SentAt.ToLocalTime():HH:mm}] {msg.Peer}: {msg.Text}" : $"(new message from {msg.Peer}; run: chat {msg.Peer})");
                 foreach (var p in result.Problems) Print($"! {p}");
+                foreach (var u in result.IdentityChanges) Print($"! run 'trust {u}' after checking with them");
             }
             catch (RelayException) when (!cts.IsCancellationRequested)
             {
@@ -160,8 +210,14 @@ static async Task Chat(Messenger m, string peer)
                 relayDown = true;
             }
             catch (OperationCanceledException) { break; }
-            try { await Task.Delay(TimeSpan.FromSeconds(2), cts.Token); }
+            // Push: the relay answers this the moment mail arrives (or after 20 s).
+            try { await m.WaitForMessagesAsync(TimeSpan.FromSeconds(20), cts.Token); }
             catch (OperationCanceledException) { break; }
+            catch (RelayException)
+            {
+                try { await Task.Delay(TimeSpan.FromSeconds(3), cts.Token); }
+                catch (OperationCanceledException) { break; }
+            }
         }
     });
 

@@ -36,6 +36,8 @@ public sealed record InboxResponse(List<InboxItem> Messages);
 
 public sealed record AckRequest(List<long> Ids);
 
+public sealed record WaitResponse(bool Pending);
+
 public sealed record ErrorResponse(string Error);
 
 public static class WireJson

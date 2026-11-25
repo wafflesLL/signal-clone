@@ -17,6 +17,12 @@ public sealed partial class ContactViewModel : ViewModelBase
 {
     private static readonly string[] Palette = ["#3A76F0", "#2E9E6B", "#C2410C", "#8B5CF6", "#DB2777", "#0E7490", "#A16207"];
 
+    public ContactViewModel(Contact contact, StoredMessage? last = null) : this(contact.Username, last)
+    {
+        Verified = contact.Verified;
+        IdentityChanged = contact.IdentityChanged;
+    }
+
     public ContactViewModel(string username, StoredMessage? last = null)
     {
         Username = username;
@@ -40,6 +46,9 @@ public sealed partial class ContactViewModel : ViewModelBase
 
     /// <summary>Set when this contact's identity key no longer matches the remembered one.</summary>
     [ObservableProperty] private bool _identityChanged;
+
+    /// <summary>The user compared safety numbers with this contact.</summary>
+    [ObservableProperty] private bool _verified;
 
     public void Update(StoredMessage m)
     {

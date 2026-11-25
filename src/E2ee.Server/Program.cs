@@ -14,6 +14,7 @@ using E2ee.Wire;
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddSingleton(sp => new RelayStore(sp.GetRequiredService<IConfiguration>()["E2EE_DB"] ?? "relay.sqlite3"));
 builder.Services.AddSingleton<ReplayGuard>();
+builder.Services.AddSingleton<InboxNotifier>();
 var app = builder.Build();
 
 const int MaxBodyBytes = 256 * 1024;
@@ -136,7 +137,7 @@ app.MapGet("/v1/users/{username}/bundle", async (string username, HttpContext ct
     return store.TakeBundle(username) is { } bundle ? Json(bundle) : Error(404, "unknown user or no prekeys");
 });
 
-app.MapPost("/v1/users/{username}/messages", async (string username, HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+app.MapPost("/v1/users/{username}/messages", async (string username, HttpContext ctx, RelayStore store, ReplayGuard replay, InboxNotifier notifier) =>
 {
     var (user, body, error) = await Authenticate(ctx, store, replay);
     if (error is not null) return error;
@@ -148,7 +149,9 @@ app.MapPost("/v1/users/{username}/messages", async (string username, HttpContext
     if (env.Initial is { } i && (i.IdentitySigPub?.Length != 32 || i.IdentityDhPub?.Length != 32 || i.EphemeralPub?.Length != 32))
         return Error(400, "malformed initial message");
     var id = store.Enqueue(username, user!, JsonSerializer.Serialize(env, WireJson.Options));
-    return id is null ? Error(429, "recipient inbox is full") : Json(new { id });
+    if (id is null) return Error(429, "recipient inbox is full");
+    notifier.Notify(username);
+    return Json(new { id });
 });
 
 app.MapGet("/v1/messages", async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>
@@ -159,6 +162,25 @@ app.MapGet("/v1/messages", async (HttpContext ctx, RelayStore store, ReplayGuard
         .Select(m => new InboxItem(m.Id, m.Sender, m.ReceivedAt, JsonSerializer.Deserialize<EnvelopeDto>(m.Envelope, WireJson.Options)!))
         .ToList();
     return Json(new InboxResponse(items));
+});
+
+// Long poll: answers as soon as the caller has mail newer than inbox id `after`, or after
+// `timeout` seconds (max 25). The answer says only whether such mail is waiting; the client
+// then fetches it with GET /v1/messages. `after` lets a client ignore mail it is holding.
+app.MapGet("/v1/messages/wait", async (HttpContext ctx, RelayStore store, ReplayGuard replay, InboxNotifier notifier) =>
+{
+    var (user, _, error) = await Authenticate(ctx, store, replay);
+    if (error is not null) return error;
+    var seconds = int.TryParse(ctx.Request.Query["timeout"], out var t) ? Math.Clamp(t, 0, 25) : 20;
+    var after = long.TryParse(ctx.Request.Query["after"], out var a) ? a : 0;
+    var signal = notifier.NextAsync(user!); // register before checking, so nothing slips through
+    if (!store.HasMessagesAfter(user!, after) && seconds > 0)
+    {
+        try { await signal.WaitAsync(TimeSpan.FromSeconds(seconds), ctx.RequestAborted); }
+        catch (TimeoutException) { }
+        catch (OperationCanceledException) { return Results.Empty; }
+    }
+    return Json(new WaitResponse(store.HasMessagesAfter(user!, after)));
 });
 
 app.MapPost("/v1/messages/ack", async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>

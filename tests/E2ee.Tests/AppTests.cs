@@ -229,9 +229,117 @@ public sealed class AppTests : IDisposable
         Assert.Empty(shell.Messages);
         Assert.Equal("this should not be sent", shell.Draft); // kept so nothing is lost
         Assert.True(shell.Selected!.IdentityChanged);
-        Assert.Contains("identity key does not match", shell.Notice);
-        Assert.True(shell.TrustNewKeyCommand.CanExecute(null));
+        Assert.False(shell.CanCompose);
+        Assert.False(shell.SendCommand.CanExecute(null));
+        Assert.True(Find<Button>(window, "ReviewKeyButton").IsEffectivelyVisible);
         Screenshot(window, "4-identity-changed");
+        vm.Dispose();
+    }
+
+    private async Task<Messenger> ReinstallBob()
+    {
+        await using (var c = new SqliteConnection($"Data Source={_relay.RelayDbPath};Pooling=False"))
+        {
+            await c.OpenAsync();
+            var cmd = c.CreateCommand();
+            cmd.CommandText = """
+                DELETE FROM accounts WHERE username = 'bob';
+                DELETE FROM signed_prekeys WHERE username = 'bob';
+                DELETE FROM one_time_prekeys WHERE username = 'bob';
+                """;
+            await cmd.ExecuteNonQueryAsync();
+        }
+        var newBob = _relay.Open("bob-reinstalled");
+        await newBob.RegisterAsync("bob");
+        return newBob;
+    }
+
+    private static string Joined(SafetyNumberViewModel s) => string.Join(" ", s.Rows).Replace("  ", " ");
+
+    [AvaloniaFact]
+    public async Task VerifySafetyNumber()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        shell.NewContact = "bob";
+        await shell.AddContactCommand.ExecuteAsync(null);
+        shell.Draft = "let's compare safety numbers";
+        await shell.SendCommand.ExecuteAsync(null);
+        await bob.SyncAsync();
+
+        await shell.ShowSafetyNumberCommand.ExecuteAsync(null);
+        var panel = Assert.IsType<SafetyNumberViewModel>(shell.Safety);
+        Assert.True(panel.IsCurrentKey);
+        Assert.Equal(await bob.SafetyNumberAsync("alice"), Joined(panel)); // what bob sees on his screen
+        Screenshot(window, "5-safety-number");
+
+        await panel.MarkVerifiedCommand.ExecuteAsync(null);
+        Assert.Null(shell.Safety);
+        Assert.True(shell.Selected!.Verified);
+        Screenshot(window, "6-verified");
+        vm.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task ReviewAndTrustAChangedKey()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        shell.NewContact = "bob";
+        await shell.AddContactCommand.ExecuteAsync(null);
+        shell.Draft = "hi bob";
+        await shell.SendCommand.ExecuteAsync(null);
+
+        var newBob = await ReinstallBob();
+        await newBob.SendAsync("alice", "new laptop, same bob");
+        await shell.SyncNowAsync();
+
+        var contact = shell.Selected!;
+        Assert.True(contact.IdentityChanged);
+        Assert.False(shell.CanCompose);
+        Assert.Single(shell.Messages); // the new message is on hold
+        Screenshot(window, "7-key-changed");
+
+        await shell.ShowSafetyNumberCommand.ExecuteAsync(null);
+        var panel = Assert.IsType<SafetyNumberViewModel>(shell.Safety);
+        Assert.True(panel.IsKeyChange);
+        Assert.Equal(await newBob.SafetyNumberAsync("alice"), Joined(panel));
+        Screenshot(window, "8-review-new-key");
+
+        await panel.TrustAndVerifyCommand.ExecuteAsync(null);
+        Assert.Null(shell.Safety);
+        Assert.False(contact.IdentityChanged);
+        Assert.True(contact.Verified);
+        Assert.True(shell.CanCompose);
+        Assert.Equal(["hi bob", "new laptop, same bob"], shell.Messages.Select(m => m.Text));
+        vm.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task PushDeliversWithoutPolling()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: true);
+        Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+
+        await bob.SendAsync("alice", "pushed");
+        for (var i = 0; i < 100 && shell.Contacts.Count == 0; i++)
+        {
+            await Task.Delay(50);
+            Dispatcher.UIThread.RunJobs();
+        }
+        Assert.Equal("pushed", Assert.Single(shell.Contacts).Preview);
         vm.Dispose();
     }
 }

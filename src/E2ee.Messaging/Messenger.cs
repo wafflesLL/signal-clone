@@ -39,7 +39,11 @@ public sealed record PrekeyPolicy
 
 public sealed record Conversation(Contact Contact, StoredMessage? Last);
 
-public sealed record SyncResult(IReadOnlyList<StoredMessage> Received, IReadOnlyList<string> Problems);
+/// <summary>An identity key as the relay reports it, with the safety number it gives.</summary>
+public sealed record IdentityCheck(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, string SafetyNumber, bool MatchesTrustedKey);
+
+/// <param name="IdentityChanges">Contacts whose safety number changed during this sync.</param>
+public sealed record SyncResult(IReadOnlyList<StoredMessage> Received, IReadOnlyList<string> Problems, IReadOnlyList<string> IdentityChanges);
 
 public class MessengerException(string message) : Exception(message);
 public sealed class NoRelayConfiguredException() : MessengerException("No relay URL given and none saved in this profile. Register first.");
@@ -47,8 +51,11 @@ public sealed class ProfileInUseException(string dir) : MessengerException($"Pro
 public sealed class UsernameTakenException(string user) : MessengerException($"The username '{user}' is already registered to someone else.");
 public sealed class UserNotFoundException(string user) : MessengerException($"No user named '{user}' is registered on this relay.");
 public sealed class IdentityChangedException(string user) : MessengerException(
-    $"{user}'s identity key does not match the one you saw before. Someone may be impersonating them, or they reinstalled. " +
-    "Check with them out of band before trusting the new key.");
+    $"{user}'s safety number changed: their identity key is not the one you trusted before. Someone may be " +
+    "impersonating them, or they reinstalled. Compare safety numbers with them before trusting the new key.")
+{
+    public string Username { get; } = user;
+}
 
 /// <summary>Plaintext inside every ratchet message. Leaves room for other types later.</summary>
 internal sealed record MessageContent(string Type, string Body, long SentAt);
@@ -67,6 +74,7 @@ public sealed class Messenger : IDisposable
     private readonly HttpClient _http;
     private IdentityKeys? _identity;
     private DateTimeOffset _lastPrekeyCheck = DateTimeOffset.MinValue;
+    private long _lastSeenInboxId; // highest relay inbox id fetched; held messages stay below it
 
     public string? Username { get; private set; }
     public bool IsRegistered => _store.GetMeta("registered") == "1";
@@ -95,7 +103,8 @@ public sealed class Messenger : IDisposable
             if (saved is not null && requested is not null && Normalize(saved) != Normalize(requested))
                 throw new MessengerException($"This profile is registered on {saved}, not {requested}.");
             var server = requested ?? saved ?? throw new NoRelayConfiguredException();
-            var http = o.HttpClient ?? new HttpClient { BaseAddress = Normalize(server), Timeout = TimeSpan.FromSeconds(15) };
+            // Long enough for a push wait (RelayClient.MaxWaitSeconds) plus slack.
+            var http = o.HttpClient ?? new HttpClient { BaseAddress = Normalize(server), Timeout = TimeSpan.FromSeconds(45) };
 
             var m = new Messenger(store, new RelayClient(http), http, o.HttpClient is null, lockFile, o.Prekeys);
             m.LoadIdentity();
@@ -298,19 +307,75 @@ public sealed class Messenger : IDisposable
         return contact;
     });
 
-    /// <summary>Accepts the identity key the relay currently has for the user, replacing the
-    /// remembered one and dropping existing sessions. Only after checking with them.</summary>
-    public Task<Contact> TrustNewIdentityAsync(string username, CancellationToken ct = default) => Locked(async () =>
+    /// <summary>
+    /// Fetches the identity key the relay currently has for the user and the safety number
+    /// it would give. Show the number to the user; if they confirm it matches what their
+    /// contact sees, pass the result to <see cref="TrustIdentityAsync"/>.
+    /// </summary>
+    public Task<IdentityCheck> CheckIdentityAsync(string username, CancellationToken ct = default) => Locked(async () =>
     {
         RequireRegistered();
         var identity = await GetIdentityOrThrow(username, ct);
-        var contact = new Contact(username, identity.IdentitySigPub, identity.IdentityDhPub, Now);
+        var known = _store.GetContact(username);
+        var matches = known is not null && Same(known, identity.IdentitySigPub, identity.IdentityDhPub);
+        return new IdentityCheck(username, identity.IdentitySigPub, identity.IdentityDhPub,
+            ComputeSafetyNumber(username, identity.IdentitySigPub, identity.IdentityDhPub), matches);
+    });
+
+    /// <summary>
+    /// Trusts exactly the key in <paramref name="check"/> (not whatever the relay has now),
+    /// clears the key-change warning, and drops old sessions if the key differs. Messages
+    /// held because of the change are processed on the next sync.
+    /// </summary>
+    public Task<Contact> TrustIdentityAsync(IdentityCheck check, bool verified = false) => Locked(() =>
+    {
+        RequireRegistered();
+        var known = _store.GetContact(check.Username);
+        var keyChanged = known is not null && !Same(known, check.IdentitySigPub, check.IdentityDhPub);
+        var contact = new Contact(check.Username, check.IdentitySigPub, check.IdentityDhPub, known?.AddedAt ?? Now, verified, false);
         using var tx = _store.Begin();
         _store.PutContact(contact);
-        _store.DeleteSessions(username);
+        if (keyChanged) _store.DeleteSessions(check.Username);
         tx.Commit();
         return contact;
     });
+
+    /// <summary>The safety number for the key you currently trust for this contact.</summary>
+    public Task<string> SafetyNumberAsync(string username) => Locked(() =>
+    {
+        RequireRegistered();
+        var c = _store.GetContact(username) ?? throw new MessengerException($"{username} is not a contact.");
+        return ComputeSafetyNumber(username, c.IdentitySigPub, c.IdentityDhPub);
+    });
+
+    /// <summary>Records that the user compared safety numbers with this contact (or undoes it).</summary>
+    public Task<Contact> SetVerifiedAsync(string username, bool verified) => Locked(() =>
+    {
+        var c = _store.GetContact(username) ?? throw new MessengerException($"{username} is not a contact.");
+        if (c.IdentityChanged) throw new IdentityChangedException(username);
+        using var tx = _store.Begin();
+        var updated = c with { Verified = verified };
+        _store.PutContact(updated);
+        tx.Commit();
+        return updated;
+    });
+
+    private string ComputeSafetyNumber(string peer, byte[] sigPub, byte[] dhPub) =>
+        SafetyNumber.Compute(Username!, P.SigPubBytes(_identity!.SigPriv), P.DhPubBytes(_identity.DhPriv), peer, sigPub, dhPub);
+
+    private static bool Same(Contact c, byte[] sigPub, byte[] dhPub) =>
+        c.IdentitySigPub.AsSpan().SequenceEqual(sigPub) && c.IdentityDhPub.AsSpan().SequenceEqual(dhPub);
+
+    /// <summary>Flags a contact whose key no longer matches. Returns false if already flagged.</summary>
+    private bool FlagIdentityChanged(string username)
+    {
+        var c = _store.GetContact(username);
+        if (c is null || c.IdentityChanged) return false;
+        using var tx = _store.Begin();
+        _store.PutContact(c with { IdentityChanged = true, Verified = false });
+        tx.Commit();
+        return true;
+    }
 
     private async Task<IdentityResponse> GetIdentityOrThrow(string username, CancellationToken ct)
     {
@@ -323,8 +388,7 @@ public sealed class Messenger : IDisposable
     {
         if (_store.GetContact(username) is { } known)
         {
-            if (!known.IdentitySigPub.AsSpan().SequenceEqual(sigPub) || !known.IdentityDhPub.AsSpan().SequenceEqual(dhPub))
-                throw new IdentityChangedException(username);
+            if (known.IdentityChanged || !Same(known, sigPub, dhPub)) throw new IdentityChangedException(username);
             return known;
         }
         var contact = new Contact(username, sigPub, dhPub, Now);
@@ -349,6 +413,7 @@ public sealed class Messenger : IDisposable
     {
         RequireRegistered();
         if (peer == Username) throw new MessengerException("You can't message yourself.");
+        if (_store.GetContact(peer) is { IdentityChanged: true }) throw new IdentityChangedException(peer);
 
         // A new session needs a bundle from the relay; fetch it before opening a transaction.
         BundleResponse? bundle = null;
@@ -362,7 +427,15 @@ public sealed class Messenger : IDisposable
         EnvelopeDto env;
         using (var tx = _store.Begin())
         {
-            var (sid, rec) = bundle is null ? _store.Sessions(peer)[0] : StartSession(peer, bundle);
+            (string Sid, SessionRecord Rec) session;
+            try { session = bundle is null ? _store.Sessions(peer)[0] : StartSession(peer, bundle); }
+            catch (IdentityChangedException)
+            {
+                tx.Dispose();
+                FlagIdentityChanged(peer);
+                throw;
+            }
+            var (sid, rec) = session;
             var state = RatchetState.FromDto(rec.State);
             var sentAt = Now;
             var plaintext = JsonSerializer.SerializeToUtf8Bytes(new MessageContent("text", text, sentAt.ToUnixTimeMilliseconds()), WireJson.Options);
@@ -430,6 +503,18 @@ public sealed class Messenger : IDisposable
     // ================================================================ receiving
 
     /// <summary>
+    /// Waits until the relay has mail for us or <paramref name="timeout"/> passes, without
+    /// blocking other operations. Returns true if there is mail; call <see cref="SyncAsync"/>
+    /// to fetch it. The relay's answer carries no message content.
+    /// </summary>
+    public async Task<bool> WaitForMessagesAsync(TimeSpan timeout, CancellationToken ct = default)
+    {
+        RequireRegistered();
+        return await _relay.WaitAsync((int)Math.Clamp(timeout.TotalSeconds, 0, RelayClient.MaxWaitSeconds), Interlocked.Read(ref _lastSeenInboxId), ct)
+            .ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Retries queued messages, fetches and decrypts the inbox, acknowledges what was
     /// handled, and keeps prekeys topped up. Each inbox item is decrypted and stored in
     /// one transaction before it is acknowledged, so a crash at any point loses nothing
@@ -448,32 +533,41 @@ public sealed class Messenger : IDisposable
         }
 
         var received = new List<StoredMessage>();
+        var changed = new List<string>();
         var consumedPrekey = false;
         while (true)
         {
             var inbox = await _relay.FetchAsync(ct);
             if (inbox.Messages.Count == 0) break;
+            Interlocked.Exchange(ref _lastSeenInboxId, Math.Max(Interlocked.Read(ref _lastSeenInboxId), inbox.Messages.Max(m => m.Id)));
             var handled = new List<long>();
             foreach (var item in inbox.Messages)
             {
                 if (!_store.IsProcessed(item.Id))
                 {
-                    var (message, problem, usedPrekey) = await ProcessAsync(item, ct);
-                    if (message is not null) received.Add(message);
-                    if (problem is not null) problems.Add(problem);
-                    consumedPrekey |= usedPrekey;
+                    var outcome = await ProcessAsync(item, ct);
+                    if (outcome.Message is not null) received.Add(outcome.Message);
+                    if (outcome.Problem is not null) problems.Add(outcome.Problem);
+                    consumedPrekey |= outcome.UsedPrekey;
+                    if (outcome.Held)
+                    {
+                        if (outcome.Problem is not null) changed.Add(item.Sender);
+                        continue; // stays on the relay until the user decides
+                    }
                 }
                 handled.Add(item.Id);
             }
-            await _relay.AckAsync(handled, ct);
-            if (inbox.Messages.Count < 100) break;
+            if (handled.Count > 0) await _relay.AckAsync(handled, ct);
+            if (inbox.Messages.Count < 100 || handled.Count == 0) break;
         }
 
         await MaintainPrekeysAsync(consumedPrekey, ct);
-        return new SyncResult(received, problems);
+        return new SyncResult(received, problems, changed);
     });
 
-    private async Task<(StoredMessage? Message, string? Problem, bool UsedPrekey)> ProcessAsync(InboxItem item, CancellationToken ct)
+    private sealed record Outcome(StoredMessage? Message, string? Problem, bool UsedPrekey, bool Held = false);
+
+    private async Task<Outcome> ProcessAsync(InboxItem item, CancellationToken ct)
     {
         var sender = item.Sender;
         // A first message from a stranger: confirm the identity in it is the one the relay
@@ -496,23 +590,30 @@ public sealed class Messenger : IDisposable
             var id = _store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received);
             _store.MarkProcessed(item.Id, "ok");
             tx.Commit();
-            return (_store.GetMessage(id), null, usedPrekey);
+            return new Outcome(_store.GetMessage(id), null, usedPrekey);
         }
-        catch (Exception e) when (e is ProtocolException or IdentityChangedException or JsonException
+        catch (IdentityChangedException)
+        {
+            // A new session from a contact under a different key: keep the message on the
+            // relay, unread, until the user checks the safety number and trusts (or not).
+            tx.Dispose();
+            var newlyFlagged = FlagIdentityChanged(sender);
+            return new Outcome(null, newlyFlagged ? $"{sender}'s safety number changed. Their new messages are on hold until you verify it." : null, false, Held: true);
+        }
+        catch (Exception e) when (e is ProtocolException or JsonException
                                       or System.Security.Cryptography.CryptographicException or FormatException or ArgumentException)
         {
             tx.Dispose();
-            var reason = e is IdentityChangedException ? e.Message : $"it could not be decrypted ({e.Message})";
-            return Drop(item, $"Dropped a message from {sender}: {reason}");
+            return Drop(item, $"Dropped a message from {sender}: it could not be decrypted ({e.Message})");
         }
     }
 
-    private (StoredMessage?, string?, bool) Drop(InboxItem item, string problem)
+    private Outcome Drop(InboxItem item, string problem)
     {
         using var tx = _store.Begin();
         _store.MarkProcessed(item.Id, "dropped");
         tx.Commit();
-        return (null, problem, false);
+        return new Outcome(null, problem, false);
     }
 
     /// <summary>Runs inside the caller's transaction and writes the updated session.</summary>
@@ -530,7 +631,7 @@ public sealed class Messenger : IDisposable
 
             if (relayIdentity is not null &&
                 (!relayIdentity.IdentitySigPub.AsSpan().SequenceEqual(init.IdentitySigPub) || !relayIdentity.IdentityDhPub.AsSpan().SequenceEqual(init.IdentityDhPub)))
-                throw new IdentityChangedException(sender);
+                throw new ProtocolException("the identity key in it is not the one registered for the sender");
             Trust(sender, init.IdentitySigPub, init.IdentityDhPub);
 
             // X3DH as the responder, using only the prekeys this message names.

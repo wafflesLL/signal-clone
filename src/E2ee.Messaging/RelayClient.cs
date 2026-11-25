@@ -67,4 +67,9 @@ public sealed class RelayClient(HttpClient http)
     public Task SendAsync(string recipient, EnvelopeDto env, CancellationToken ct = default) => Send<Ok>(HttpMethod.Post, $"v1/users/{recipient}/messages", env, ct);
     public Task<InboxResponse> FetchAsync(CancellationToken ct = default) => Send<InboxResponse>(HttpMethod.Get, "v1/messages", null, ct);
     public Task AckAsync(List<long> ids, CancellationToken ct = default) => Send<Ok>(HttpMethod.Post, "v1/messages/ack", new AckRequest(ids), ct);
+
+    public const int MaxWaitSeconds = 25;
+
+    public async Task<bool> WaitAsync(int seconds, long afterId, CancellationToken ct = default) =>
+        (await Send<WaitResponse>(HttpMethod.Get, $"v1/messages/wait?timeout={seconds}&after={afterId}", null, ct)).Pending;
 }
