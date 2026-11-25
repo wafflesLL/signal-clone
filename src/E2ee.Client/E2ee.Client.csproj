@@ -2,6 +2,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\E2ee.Core\E2ee.Core.csproj" />
+    <ProjectReference Include="..\E2ee.Messaging\E2ee.Messaging.csproj" />
   </ItemGroup>
 
   <PropertyGroup>

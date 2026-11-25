@@ -45,6 +45,7 @@ public static class Primitives
     public static byte[] DhPubBytes(PublicKey pub) => pub.Export(KeyBlobFormat.RawPublicKey);
     public static PublicKey DhPubFromBytes(byte[] data) => PublicKey.Import(X25519, data, KeyBlobFormat.RawPublicKey);
     public static Key DhPrivFromBytes(byte[] data) => Key.Import(X25519, data, KeyBlobFormat.RawPrivateKey, Exportable);
+    public static byte[] DhPrivBytes(Key key) => key.Export(KeyBlobFormat.RawPrivateKey);
 
     // ------------------------------------------------------------ Ed25519 (sigs)
     public static Key SigGenerate() => Key.Create(Ed25519, Exportable);
@@ -54,6 +55,7 @@ public static class Primitives
     public static byte[] SigPubBytes(PublicKey pub) => pub.Export(KeyBlobFormat.RawPublicKey);
     public static PublicKey SigPubFromBytes(byte[] data) => PublicKey.Import(Ed25519, data, KeyBlobFormat.RawPublicKey);
     public static Key SigPrivFromBytes(byte[] data) => Key.Import(Ed25519, data, KeyBlobFormat.RawPrivateKey, Exportable);
+    public static byte[] SigPrivBytes(Key key) => key.Export(KeyBlobFormat.RawPrivateKey);
 
     // ----------------------------------------------------------------- KDFs
     /// <summary>HKDF-SHA256. A null salt means HashLen zero bytes (RFC 5869 sec. 2.2).</summary>

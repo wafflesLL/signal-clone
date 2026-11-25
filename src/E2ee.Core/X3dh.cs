@@ -41,11 +41,23 @@ public static class X3dh
 
     public static IdentityKeys GenerateIdentity() => new(P.SigGenerate(), P.DhGenerate());
 
-    private static byte[] SignedData(uint spkId, byte[] pub)
+    /// <summary>The bytes an identity signs to vouch for a signed prekey.</summary>
+    public static byte[] SignedPrekeyData(uint spkId, byte[] pub)
     {
         var id = new byte[4];
         BinaryPrimitives.WriteUInt32BigEndian(id, spkId);
         return P.Concat("COSC483-SPK-v1"u8.ToArray(), id, pub);
+    }
+
+    public static byte[] SignPrekey(IdentityKeys identity, uint spkId, byte[] pub) =>
+        P.Sign(identity.SigPriv, SignedPrekeyData(spkId, pub));
+
+    /// <summary>False for a bad signature or malformed key, never throws.</summary>
+    public static bool VerifyPrekey(byte[] identitySigPub, uint spkId, byte[] pub, byte[] sig)
+    {
+        if (identitySigPub.Length != 32 || pub.Length != 32 || sig.Length != 64) return false;
+        try { return P.Verify(P.SigPubFromBytes(identitySigPub), sig, SignedPrekeyData(spkId, pub)); }
+        catch (FormatException) { return false; }
     }
 
     public static (LocalPrekeyStore Store, List<PrekeyBundle> Bundles) GeneratePrekeys(IdentityKeys identity, int nOneTime = 20)
@@ -54,7 +66,7 @@ public static class X3dh
         var spk = P.DhGenerate();
         var store = new LocalPrekeyStore(identity);
         store.SignedPrekeys[1] = spk;
-        var sig = P.Sign(identity.SigPriv, SignedData(1, P.DhPubBytes(spk)));
+        var sig = P.Sign(identity.SigPriv, SignedPrekeyData(1, P.DhPubBytes(spk)));
 
         PrekeyBundle Make(uint? opkId = null, byte[]? opkPub = null) => new()
         {
@@ -86,7 +98,7 @@ public static class X3dh
     {
         if (bundle.OneTimePrekeyId is null != bundle.OneTimePrekeyPub is null)
             throw new ProtocolException("inconsistent OPK bundle");
-        if (!P.Verify(P.SigPubFromBytes(bundle.IdentitySigPub), bundle.SignedPrekeySig, SignedData(bundle.SignedPrekeyId, bundle.SignedPrekeyPub)))
+        if (!VerifyPrekey(bundle.IdentitySigPub, bundle.SignedPrekeyId, bundle.SignedPrekeyPub, bundle.SignedPrekeySig))
             throw new ProtocolException("invalid signed prekey signature");
 
         var ek = P.DhGenerate();

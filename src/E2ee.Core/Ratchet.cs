@@ -46,6 +46,17 @@ public sealed class RatchetState
     /// <summary>Skipped message keys indexed by (ratchet public key, message number).</summary>
     public Dictionary<(string DhPub, long N), byte[]> MKSKIPPED { get; set; } = new();
 
+    /// <summary>Snapshot for persistence. Contains private keys: callers must encrypt it at rest.</summary>
+    public RatchetStateDto ToDto() => new(
+        P.DhPrivBytes(DHs), DHr, RK, CKs, CKr, Ns, Nr, PN,
+        MKSKIPPED.Select(kv => new SkippedKeyDto(Convert.FromHexString(kv.Key.DhPub), kv.Key.N, kv.Value)).ToList());
+
+    public static RatchetState FromDto(RatchetStateDto d) => new()
+    {
+        DHs = P.DhPrivFromBytes(d.DHs), DHr = d.DHr, RK = d.RK, CKs = d.CKs, CKr = d.CKr, Ns = d.Ns, Nr = d.Nr, PN = d.PN,
+        MKSKIPPED = d.Skipped.ToDictionary(k => (Convert.ToHexString(k.DhPub), k.N), k => k.Mk),
+    };
+
     internal RatchetState Clone() => new()
     {
         DHs = DHs, DHr = DHr, RK = RK, CKs = CKs, CKr = CKr, Ns = Ns, Nr = Nr, PN = PN,
@@ -59,6 +70,11 @@ public sealed class RatchetState
         (DHs, DHr, RK, CKs, CKr, Ns, Nr, PN, MKSKIPPED) = (w.DHs, w.DHr, w.RK, w.CKs, w.CKr, w.Ns, w.Nr, w.PN, w.MKSKIPPED);
     }
 }
+
+public sealed record SkippedKeyDto(byte[] DhPub, long N, byte[] Mk);
+
+public sealed record RatchetStateDto(
+    byte[] DHs, byte[]? DHr, byte[] RK, byte[]? CKs, byte[]? CKr, long Ns, long Nr, long PN, List<SkippedKeyDto> Skipped);
 
 public static class Ratchet
 {

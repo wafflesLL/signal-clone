@@ -1,103 +1,183 @@
-﻿// In-memory two-party E2EE demonstration through a running relay.
+﻿// Headless CLI over E2ee.Messaging. Each profile is one user with its own encrypted state.
 //
-// Run: dotnet run --project src/E2ee.Client -- --server http://127.0.0.1:8000
-// This demonstration does not persist keys or support independent chat terminals.
+//   dotnet run --project src/E2ee.Client -- --profile alice register alice --server http://127.0.0.1:8000
+//   dotnet run --project src/E2ee.Client -- --profile alice chat bob
 
-using System.Net.Http.Json;
-using System.Text;
-using System.Text.Json.Nodes;
-using E2ee;
-using P = E2ee.Primitives;
+using E2ee.Messaging;
 
-var server = "http://127.0.0.1:8000";
-for (var i = 0; i < args.Length - 1; i++)
-    if (args[i] == "--server") server = args[i + 1];
+const string Usage = """
+    usage: e2ee [--profile NAME | --data-dir DIR] [--server URL] [--key-file] <command>
 
-static string B64(byte[] x) => Convert.ToBase64String(x);
-static byte[] Un64(JsonNode? x) => Convert.FromBase64String((string)x!);
-static uint? OptId(JsonNode? x) => x is null ? null : (uint)x;
+    commands:
+      register <username>        create keys and claim a username on the relay
+      whoami                     show this profile's username and relay
+      add <username>             look up a user and remember their identity key
+      contacts                   list contacts
+      send <username> <text...>  send one message
+      sync                       fetch and print new messages
+      history <username> [n]     show the last n messages (default 20)
+      trust <username>           accept a contact's new identity key (check with them first)
+      chat <username>            interactive chat; type /quit to leave
 
-using var http = new HttpClient { BaseAddress = new Uri(server), Timeout = TimeSpan.FromSeconds(10) };
+    options:
+      --profile NAME   profile under the user data folder (default: default)
+      --data-dir DIR   use this folder for the profile instead
+      --server URL     relay URL (needed for register; remembered afterwards)
+      --key-file       keep the master key in a file instead of the OS keychain
+    """;
 
-async Task<JsonObject> Post(string path, JsonObject data)
+string? profile = null, dataDir = null, server = null;
+var keyFile = Environment.GetEnvironmentVariable("E2EE_KEYSTORE") == "file";
+var rest = new List<string>();
+for (var i = 0; i < args.Length; i++)
 {
-    var resp = await http.PostAsJsonAsync(path, new JsonObject { ["data"] = data });
-    resp.EnsureSuccessStatusCode();
-    return (await resp.Content.ReadFromJsonAsync<JsonObject>())!;
-}
-
-async Task<JsonObject> Get(string path)
-{
-    var resp = await http.GetAsync(path);
-    resp.EnsureSuccessStatusCode();
-    return (await resp.Content.ReadFromJsonAsync<JsonObject>())!;
-}
-
-var alice = X3dh.GenerateIdentity();
-var bob = X3dh.GenerateIdentity();
-var (store, bundles) = X3dh.GeneratePrekeys(bob, 3);
-var bundle = bundles[0];
-
-// Bob publishes his public prekey bundle.
-var opkList = new JsonArray();
-foreach (var (id, key) in store.OneTimePrekeys)
-    opkList.Add(new JsonObject { ["id"] = id, ["pub"] = B64(P.DhPubBytes(key)) });
-await Post("/users/bob/bundle", new JsonObject
-{
-    ["identity_sig_pub"] = B64(bundle.IdentitySigPub),
-    ["identity_dh_pub"] = B64(bundle.IdentityDhPub),
-    ["signed_prekey_id"] = bundle.SignedPrekeyId,
-    ["signed_prekey_pub"] = B64(bundle.SignedPrekeyPub),
-    ["signed_prekey_sig"] = B64(bundle.SignedPrekeySig),
-    ["opks"] = opkList,
-});
-
-// Alice fetches it and runs X3DH.
-var data = (await Get("/users/bob/bundle"))["data"]!;
-var opk = data["opk"];
-var fetched = new PrekeyBundle
-{
-    IdentitySigPub = Un64(data["identity_sig_pub"]),
-    IdentityDhPub = Un64(data["identity_dh_pub"]),
-    SignedPrekeyId = (uint)data["signed_prekey_id"]!,
-    SignedPrekeyPub = Un64(data["signed_prekey_pub"]),
-    SignedPrekeySig = Un64(data["signed_prekey_sig"]),
-    OneTimePrekeyId = OptId(opk?["id"]),
-    OneTimePrekeyPub = opk is null ? null : Un64(opk["pub"]),
-};
-var (skA, ad, ek) = X3dh.Initiate(alice, fetched);
-var ra = Ratchet.InitAlice(skA, fetched.SignedPrekeyPub);
-var (header, ct) = Ratchet.Encrypt(ra, "Hello Bob! This is encrypted."u8.ToArray(), ad);
-await Post("/users/bob/messages", new JsonObject
-{
-    ["initial"] = new JsonObject
+    switch (args[i])
     {
-        ["identity_sig_pub"] = B64(P.SigPubBytes(alice.SigPriv)),
-        ["identity_dh_pub"] = B64(P.DhPubBytes(alice.DhPriv)),
-        ["ephemeral_pub"] = B64(P.DhPubBytes(ek)),
-        ["signed_prekey_id"] = fetched.SignedPrekeyId,
-        ["one_time_prekey_id"] = fetched.OneTimePrekeyId,
-    },
-    ["header"] = B64(header.Encode()),
-    ["ciphertext"] = B64(ct),
-});
+        case "--profile" when i + 1 < args.Length: profile = args[++i]; break;
+        case "--data-dir" when i + 1 < args.Length: dataDir = args[++i]; break;
+        case "--server" when i + 1 < args.Length: server = args[++i]; break;
+        case "--key-file": keyFile = true; break;
+        case "-h" or "--help": Console.WriteLine(Usage); return 0;
+        default: rest.Add(args[i]); break;
+    }
+}
+if (rest.Count == 0) { Console.Error.WriteLine(Usage); return 2; }
 
-// Bob drains his inbox, completes X3DH, and decrypts.
-var envelope = (await Get("/users/bob/messages"))["messages"]![0]!;
-var init = envelope["initial"]!;
-var receivedFirst = new InitialMessage(
-    Un64(init["identity_sig_pub"]), Un64(init["identity_dh_pub"]), Un64(init["ephemeral_pub"]),
-    (uint)init["signed_prekey_id"]!, OptId(init["one_time_prekey_id"]), []);
-var (skB, adB) = X3dh.Respond(store, receivedFirst);
-var rb = Ratchet.InitBob(skB, store.SignedPrekeys[receivedFirst.SignedPrekeyId]);
-var text = Ratchet.Decrypt(rb, Header.Decode(Un64(envelope["header"])), Un64(envelope["ciphertext"]), adB);
-X3dh.ConsumeOneTimePrekey(store, receivedFirst.OneTimePrekeyId); // only after the first message authenticated
-Console.WriteLine($"Bob decrypted: {Encoding.UTF8.GetString(text)}");
+dataDir ??= Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "E2ee", profile ?? "default");
+var command = rest[0];
+var argv = rest.Skip(1).ToList();
 
-// Bob replies; Alice decrypts.
-var (header2, ct2) = Ratchet.Encrypt(rb, "Hi Alice, I can read you!"u8.ToArray(), adB);
-await Post("/users/alice/messages", new JsonObject { ["header"] = B64(header2.Encode()), ["ciphertext"] = B64(ct2) });
-var reply = (await Get("/users/alice/messages"))["messages"]![0]!;
-var replyText = Ratchet.Decrypt(ra, Header.Decode(Un64(reply["header"])), Un64(reply["ciphertext"]), ad);
-Console.WriteLine($"Alice decrypted: {Encoding.UTF8.GetString(replyText)}");
-Console.WriteLine("SUCCESS: relay transported ciphertext; both peers decrypted.");
+string Arg(int i, string name) => i < argv.Count ? argv[i] : throw new MessengerException($"missing <{name}>; see --help");
+
+try
+{
+    using var m = Messenger.Open(new MessengerOptions
+    {
+        DataDirectory = dataDir,
+        Server = server is null ? null : new Uri(server),
+        KeyStore = keyFile ? new FileMasterKeyStore(dataDir) : null,
+    });
+    switch (command)
+    {
+        case "register":
+            await m.RegisterAsync(Arg(0, "username"));
+            Console.WriteLine($"Registered as {m.Username} on {m.Server}");
+            WarnIfPlainHttp(m.Server);
+            break;
+
+        case "whoami":
+            Console.WriteLine(m.IsRegistered ? $"{m.Username} on {m.Server} (profile {dataDir})" : $"Not registered (profile {dataDir})");
+            break;
+
+        case "add":
+            var added = await m.AddContactAsync(Arg(0, "username"));
+            Console.WriteLine($"Added {added.Username}");
+            break;
+
+        case "contacts":
+            foreach (var c in m.Contacts()) Console.WriteLine(c.Username);
+            break;
+
+        case "send":
+            var sent = await m.SendAsync(Arg(0, "username"), string.Join(' ', argv.Skip(1)));
+            Console.WriteLine(sent.Status == MessageStatus.Sent ? "Sent." : "Relay unreachable; queued and will retry on the next sync.");
+            break;
+
+        case "sync":
+            var result = await m.SyncAsync();
+            foreach (var msg in result.Received) PrintMessage(msg);
+            foreach (var p in result.Problems) Console.Error.WriteLine($"! {p}");
+            if (result.Received.Count == 0) Console.WriteLine("No new messages.");
+            break;
+
+        case "history":
+            var n = argv.Count > 1 && int.TryParse(argv[1], out var parsed) ? parsed : 20;
+            foreach (var msg in m.History(Arg(0, "username"), n)) PrintMessage(msg);
+            break;
+
+        case "trust":
+            await m.TrustNewIdentityAsync(Arg(0, "username"));
+            Console.WriteLine($"Now trusting {argv[0]}'s current identity key. Old sessions were dropped.");
+            break;
+
+        case "chat":
+            await Chat(m, Arg(0, "username"));
+            break;
+
+        default:
+            Console.Error.WriteLine($"unknown command '{command}'\n\n{Usage}");
+            return 2;
+    }
+    return 0;
+}
+catch (Exception e) when (e is MessengerException or RelayException)
+{
+    Console.Error.WriteLine($"error: {e.Message}");
+    return 1;
+}
+
+static void WarnIfPlainHttp(Uri server)
+{
+    if (server.Scheme == "http" && !server.IsLoopback)
+        Console.Error.WriteLine("warning: the relay uses plain HTTP. Messages stay end-to-end encrypted, but anyone on the network can see who talks to whom.");
+}
+
+static void PrintMessage(StoredMessage msg)
+{
+    var who = msg.Outgoing ? "me" : msg.Peer;
+    var flag = msg.Status switch { MessageStatus.Pending => " (pending)", MessageStatus.Failed => " (failed)", _ => "" };
+    Console.WriteLine($"[{msg.SentAt.ToLocalTime():HH:mm}] {who}: {msg.Text}{flag}");
+}
+
+static async Task Chat(Messenger m, string peer)
+{
+    var consoleLock = new object();
+    void Print(string line) { lock (consoleLock) Console.WriteLine(line); }
+
+    if (m.GetContact(peer) is null) await m.AddContactAsync(peer);
+    foreach (var msg in m.History(peer, 20)) PrintMessage(msg);
+    Print($"--- chatting with {peer} as {m.Username}. Type /quit to leave. ---");
+
+    using var cts = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; cts.Cancel(); };
+    var relayDown = false;
+
+    var poller = Task.Run(async () =>
+    {
+        while (!cts.IsCancellationRequested)
+        {
+            try
+            {
+                var result = await m.SyncAsync(cts.Token);
+                if (relayDown) { Print("--- relay is back ---"); relayDown = false; }
+                foreach (var msg in result.Received)
+                    Print(msg.Peer == peer ? $"[{msg.SentAt.ToLocalTime():HH:mm}] {msg.Peer}: {msg.Text}" : $"(new message from {msg.Peer}; run: chat {msg.Peer})");
+                foreach (var p in result.Problems) Print($"! {p}");
+            }
+            catch (RelayException) when (!cts.IsCancellationRequested)
+            {
+                if (!relayDown) Print("--- relay unreachable, retrying ---");
+                relayDown = true;
+            }
+            catch (OperationCanceledException) { break; }
+            try { await Task.Delay(TimeSpan.FromSeconds(2), cts.Token); }
+            catch (OperationCanceledException) { break; }
+        }
+    });
+
+    while (!cts.IsCancellationRequested)
+    {
+        var line = await Task.Run(Console.ReadLine);
+        if (line is null || line.Trim() == "/quit") break;
+        if (string.IsNullOrWhiteSpace(line)) continue;
+        try
+        {
+            var sent = await m.SendAsync(peer, line);
+            if (sent.Status == MessageStatus.Pending) Print("(queued: relay unreachable)");
+        }
+        catch (MessengerException e) { Print($"! {e.Message}"); }
+        catch (RelayException e) { Print($"! {e.Message}"); }
+    }
+    cts.Cancel();
+    await poller;
+}

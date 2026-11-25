@@ -1,50 +1,77 @@
 # Project Strategy
 
+## Goal
+
+We're building a **usable end-to-end encrypted messenger**: a desktop app that two people on
+different computers install, sign up in, add each other, and chat in. Every message goes
+through the X3DH and Double Ratchet code in this repo, and the relay only ever sees
+ciphertext. The protocol is the core of the work. The app is how we show it works for real
+people and not just in unit tests.
+
+"Usable" means all of these:
+
+- Install and run the app on macOS and Windows (Linux if it comes for free) without a terminal.
+- Pick a username and register with a relay. The app generates and uploads keys on its own.
+- Add a contact by username, then send and receive messages in real time.
+- Quit and reopen the app and keep identity, sessions, and history.
+- Compare a safety number with a contact to check that nobody is in the middle.
+- See an error, not a crash, when the relay is down or a message fails to decrypt.
+
 ## What we're graded on
 
-The grade is the **report**: five sections at 20 points each (Intro, Background, Design,
-Implementation and Testing, Discussion), written in ACM LaTeX. The code is a supporting
-artifact. Each phase of work below therefore ends with something that goes straight
-into a report section. A failed stretch goal costs us nothing, as long as the report
-explains why it failed.
+The grade is still the **report**: five sections at 20 points each (Intro, Background,
+Design, Implementation and Testing, Discussion), written in ACM LaTeX. A usable app makes
+the report stronger, not weaker. It gives §3 a real system architecture, gives §4 an
+end-to-end evaluation and screenshots, and gives §5 real lessons about deploying a secure
+protocol. Each phase below still ends with something that goes straight into a report
+section. A failed stretch goal costs us nothing, as long as the report explains why it
+failed.
 
-Submission: report PDF, a zip of artifacts, `transcripts.zip` (we use AI), and a Canvas
-comment about AI use.
+Submission: report PDF, a zip of artifacts (source plus built app), `transcripts.zip` (we
+use AI), and a Canvas comment about AI use.
 
 ## Guiding principles
 
 1. **Build bottom-up and test each layer before starting the next.** The order is
-   primitives, then X3DH, then the Double Ratchet, then the transport. The ratchet is
-   only debuggable if X3DH is known to be correct. Key-agreement bugs look like "decrypt
-   failed" two layers up.
-2. **Every claim in the email maps to a test.** `tests/E2ee.Tests/ProtocolTests.cs` holds
-   them. "Done" means the test exists and is green.
-3. **The protocol is the project, and the app is a demo.** A CLI client is enough. A GUI is
-   polish we only add if time remains.
-4. **Mirror the spec.** Function and variable names follow the Signal pseudocode
+   primitives, X3DH, Double Ratchet, session layer, then UI. The UI never calls crypto
+   directly; it calls the session layer. Key-agreement bugs look like "decrypt failed" two
+   layers up, so every layer below the UI has to be covered by tests.
+2. **Every security claim maps to a test.** Protocol claims live in
+   `tests/E2ee.Tests/ProtocolTests.cs` and session/relay claims in their own test files.
+   "Done" means the test exists and is green.
+3. **The app is the product and the protocol is the core.** Every feature goes through
+   the real protocol. There are no "demo mode" shortcuts that skip encryption.
+4. **Keep the UI thin.** The headless CLI and the desktop app share the same session
+   library. If a feature works in the CLI, the UI only has to render it, and the CLI stays
+   our scripted test harness and demo tool.
+5. **Mirror the spec.** Function and variable names follow the Signal pseudocode
    (`RatchetEncrypt`, `DHs`, `CKr`, `MKSKIPPED`), so a reviewer can check our code against
    the spec line by line.
-5. **Record deviations from Signal the moment we make one.** That list becomes part of
+6. **Record deviations from Signal the moment we make one.** That list becomes part of
    the Design section.
 
 ## Architecture
 
 ```
- Alice client                    Relay server (untrusted)                 Bob client
- ┌────────────┐   bundle fetch   ┌───────────────────────┐   bundle upload  ┌────────────┐
- │ identity   │ ───────────────▶ │ prekey bundles (pub)  │ ◀─────────────── │ identity   │
- │ ratchet[]  │   envelopes      │ inbox queues (opaque) │   envelopes      │ prekeys    │
- │ local db   │ ◀──────────────▶ │ no keys, no plaintext │ ◀──────────────▶ │ ratchet[]  │
- └────────────┘                  └───────────────────────┘                  └────────────┘
+ Alice: E2ee.App (desktop)          Relay: E2ee.Server (untrusted)          Bob: E2ee.App
+ ┌──────────────────────┐          ┌───────────────────────────┐          ┌──────────────────────┐
+ │ UI (Avalonia, MVVM)  │          │ accounts: user → id keys  │          │ UI (Avalonia, MVVM)  │
+ │──────────────────────│  HTTPS   │ prekey bundles (public)   │  HTTPS   │──────────────────────│
+ │ E2ee.Messaging       │ ◀──────▶ │ inbox queues (opaque)     │ ◀──────▶ │ E2ee.Messaging       │
+ │  sessions, contacts, │ +push    │ signed-request auth       │ +push    │  sessions, contacts, │
+ │  local encrypted db  │          │ no secrets, no plaintext  │          │  local encrypted db  │
+ │──────────────────────│          └───────────────────────────┘          │──────────────────────│
+ │ E2ee.Core (protocol) │                                                 │ E2ee.Core (protocol) │
+ └──────────────────────┘                                                 └──────────────────────┘
 ```
 
-| Module | Role |
-|---|---|
-| `E2ee.Core/Primitives.cs` | Wrappers over NSec (X25519, Ed25519) and the .NET BCL (HKDF, HMAC, AES-256-GCM). **Done, and RFC vectors pass.** |
-| `E2ee.Core/X3dh.cs` | Prekey bundles, `Initiate`, `Respond`. |
-| `E2ee.Core/Ratchet.cs` | Double Ratchet state machine and header encoding. |
-| `E2ee.Server` | ASP.NET Core minimal API and SQLite relay: bundle store and inbox queues. |
-| `E2ee.Client` | Session manager and CLI chat. |
+| Project | Role | Status |
+|---|---|---|
+| `E2ee.Core` | Protocol library: `Primitives.cs` (NSec + .NET BCL wrappers), `X3dh.cs`, `Ratchet.cs`. | Implemented; RFC vectors and protocol tests pass. |
+| `E2ee.Messaging` | Session layer shared by the app and CLI: account setup, prekey upload and refill, contact list, session manager (first message vs. ongoing), local storage, relay client, safety numbers. | Done except safety numbers (milestone 5). |
+| `E2ee.Server` | ASP.NET Core and SQLite relay: accounts, bundle store, inbox queues, real-time push. | Accounts, signed-request auth, and acknowledged inboxes done; push is milestone 5. |
+| `E2ee.App` | Avalonia desktop app: onboarding, contact list, chat view, safety-number screen, settings. | To build. |
+| `E2ee.Client` | Headless CLI over `E2ee.Messaging`, for scripted demos and integration tests. | Done. |
 
 **Language choice: C# on .NET 8.** X25519 and Ed25519 come from NSec.Cryptography, a thin
 binding to libsodium. HKDF-SHA256, HMAC-SHA256, and AES-256-GCM come from the .NET base class
@@ -53,39 +80,88 @@ CommonCrypto). We still hand-roll nothing below the protocol layer, and static t
 key/byte confusion a compile error. The project started in Python with pyca/`cryptography`
 and was ported; the protocol constants and wire format did not change.
 
-**Known deviation:** Signal signs prekeys with XEdDSA under the X25519 identity key. neither NSec nor
-the BCL has XEdDSA, so each identity has two keys: Ed25519 for signing and X25519 for DH. This
-is a common simplification, and the report will discuss why it is fine here.
+**UI choice: Avalonia.** It's a cross-platform .NET desktop UI that builds for macOS,
+Windows, and Linux from one codebase with no extra platform workloads, and it uses the
+MVVM pattern, which keeps the UI testable and thin. We considered .NET MAUI, which also
+reaches iOS and Android, but on macOS it needs Xcode and Mac Catalyst workloads and it has
+no Linux target. Mobile is out of scope; the report's §5 can discuss it.
+
+**Real-time delivery.** First version: the app polls its inbox every couple of seconds,
+which is simple and good enough at chat speeds. Upgrade: a SignalR (WebSocket) channel
+that pushes a "you have mail" notification. Messages are still fetched over the same
+authenticated endpoint, so push carries no message content.
+
+**Relay authentication.** Usernames are bound to an Ed25519 identity key on first
+registration (trust on first use at the server). Every request is signed with that key over
+the method, path, username, a millisecond timestamp, and a hash of the body. The relay
+rejects timestamps more than five minutes off and any signature it has already seen. The
+server holds no secrets. Inbox messages stay queued until the recipient acknowledges them,
+so a client crash loses nothing.
+
+**Local storage.** Each app keeps its identity keys, prekeys, ratchet states, contacts,
+and message history in a local SQLite file. Private keys, ratchet state, message bodies, and
+queued envelopes are encrypted at rest (AES-256-GCM, with the row name as associated data)
+under a per-profile master key held by the OS (macOS Keychain, Windows DPAPI, or an
+owner-only key file on Linux). Usernames, contact public keys, and timestamps are not
+encrypted. Ratchet state is written in the same transaction as the message it decrypted,
+and the inbox item is acknowledged only after that commit, so a crash can neither lose a
+message nor apply one twice.
+
+**Sessions.** A peer can have several sessions (at most five are kept). An incoming
+message carrying X3DH fields picks its session by the sender's ephemeral key; any other
+message is tried against each session, newest first. When both people start a session at
+the same moment, this converges on one session after a round trip, which is the same
+approach Signal takes. The initiator keeps resending the X3DH fields until the first reply.
+A first message from a stranger is accepted only if its identity key matches the one the
+relay has registered for the sender, and a known contact whose key changes is rejected
+until the user runs `trust`.
+
+**Known deviations from Signal:**
+- The relay authenticates clients with signatures from the identity key instead of a
+  password, so one key does both jobs. Simpler, but compromising the identity key also lets
+  an attacker read (still encrypted) inbox traffic.
+- Signal signs prekeys with XEdDSA under the X25519 identity key. Neither NSec nor the BCL
+  has XEdDSA, so each identity has two keys: Ed25519 for signing and X25519 for DH. This
+  is a common simplification, and the report will discuss why it is fine here.
+- One device per account. Signal's multi-device support (Sesame) is out of scope.
+- Contact discovery is by exact username, not by phone number.
 
 ## Milestones
 
 Dates are relative to the start. Adjust them once the due date is known.
 
-| # | Weeks | Deliverable | Feeds report § |
-|---|---|---|---|
-| 0 | 0 | Proposal approved, repo up, roles assigned. Primitives and KATs (done). | — |
-| 1 | 1 | **X3DH**: both sides derive the same SK, with and without an OPK. Bad SPK signature rejected. OPK deleted after use. Cross-checked against an independent implementation. | 3, 4 |
-| 2 | 2–3 | **Double Ratchet**: ping-pong, out-of-order delivery, dropped messages, MAX_SKIP, tamper and replay rejection, state rollback on failure. | 3, 4 |
-| 3 | 3–4 | **Relay server and CLI client**: two terminals chatting through the server, with state persisted to disk. | 3, 4 |
-| 4 | 4 | **Security demos**: forward secrecy, post-compromise security, server-only-sees-ciphertext. Put them in tests and in a scripted demo. | 4 |
-| 5 | 5 | **Stretch**: safety numbers first (cheap and visible), then group messaging (sender keys). | 4, 5 |
-| 6 | 5–6 | Report writing, figures, artifact zip, transcripts. | all |
+| # | Weeks | Deliverable | Feeds report § | Status |
+|---|---|---|---|---|
+| 0 | 0 | Proposal approved, repo up, roles assigned. Primitives and KATs. | — | Done |
+| 1 | 1 | **X3DH**: both sides derive the same SK, with and without an OPK. Bad SPK signature rejected. OPK deleted after use. Cross-checked against an independent implementation. | 3, 4 | Done except the cross-check |
+| 2 | 1–2 | **Double Ratchet**: ping-pong, out-of-order delivery, dropped messages, MAX_SKIP, tamper and replay rejection, state rollback on failure. | 3, 4 | Done |
+| 3 | 2–3 | **Session layer and authenticated relay**: `E2ee.Messaging` with persistent encrypted local state, account registration, signed relay requests, prekey refill. The CLI rebuilt on it: two terminals on two machines chatting, surviving restarts. | 3, 4 | Done (tested on one machine; try two machines on a LAN) |
+| 4 | 3–4 | **Desktop app MVP**: Avalonia app with onboarding, contact list, chat view, and polling delivery. Two people on two laptops can chat. | 3, 4 | |
+| 5 | 4–5 | **Trust and polish**: safety-number screen, key-change warnings, SignalR push, error states, packaged builds (`.app` and `.exe`) attached to a GitHub release. | 3, 4 | |
+| 6 | 4–5 | **Security demos** in tests and a scripted CLI demo: forward secrecy, post-compromise security, server-only-sees-ciphertext. Run a small usability check with a few classmates. | 4 | |
+| 7 | 5 | **Stretch**: attachments (encrypt the file, send the key in a message), then group messaging (sender keys). | 4, 5 | |
+| 8 | 5–6 | Report writing, figures and screenshots, artifact zip, transcripts. | all | |
 
-Write the report continuously. Background (§2) can be written during week 1, while
-reading the specs. Design (§3) gets drafted as soon as milestone 2's interfaces settle.
+Write the report continuously. Background (§2) can be written while reading the specs,
+and Design (§3) gets drafted as soon as milestone 3's interfaces settle.
 
 ## Correctness strategy ("test vectors")
 
 Signal doesn't publish official X3DH or Double Ratchet test vectors, so the email's
-"test against known test vectors" becomes three layers:
+"test against known test vectors" becomes four layers:
 
-1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in `tests/E2ee.Tests/PrimitivesTests.cs`
-   and already pass.
+1. **Primitive KATs** from RFC 7748, 8032, and 5869. These are in
+   `tests/E2ee.Tests/PrimitivesTests.cs` and pass.
 2. **Protocol known-answer and interop**: fix every private key, then compare our SK and
-   message keys against an independent implementation, such as the `x3dh` and `doubleratchet`
-   PyPI packages (or libsignal) configured with the same KDF parameters, or a teammate's separate script.
-   That turns the protocol into deterministic vectors we can commit under `tests/vectors/`.
+   message keys against an independent implementation, such as the `x3dh` and
+   `doubleratchet` PyPI packages (or libsignal) configured with the same KDF parameters,
+   or a teammate's separate script. That turns the protocol into deterministic vectors we
+   can commit under `tests/vectors/`.
 3. **Property tests**: randomized delivery orders and drops (seeded), tampering, replay.
+4. **End-to-end tests**: two `E2ee.Messaging` instances talking through an in-process
+   relay (`WebApplicationFactory`), covering first contact, restarts mid-conversation,
+   OPK exhaustion, an unauthenticated inbox read being rejected, and a contact's identity
+   key changing. These are in `MessagingTests.cs` and `RelayAuthTests.cs` and pass.
 
 The report should say this plainly: "no official vectors exist, so we did X". A reviewer
 trusts a plain statement like that more than an overclaim.
@@ -98,20 +174,25 @@ trusts a plain statement like that more than an overclaim.
 - **Post-compromise security**: the attacker clones Alice's state at *t*. Plot "can the
   attacker decrypt message *i*?" against *i*. Access drops to zero after one DH ratchet
   round trip. That plot makes a good figure for §4.
-- **Untrusted server**: run a full conversation and grep the server DB and logs for the
-  plaintexts. There should be zero hits. Also show the server can't tell which messages
-  are first-contact beyond what the headers reveal, and be honest about metadata
-  (who talks to whom and when) staying visible.
+- **Untrusted server**: run a full conversation in the app and grep the server DB and logs
+  for the plaintexts. There should be zero hits. Be honest that metadata (who talks to
+  whom and when) stays visible to the relay.
+- **Active attacker at the relay**: show that a relay that swaps in its own prekey bundle
+  is caught when the users compare safety numbers, and that the app warns when a known
+  contact's identity key changes.
+- **Usability**: a short task-based check with a few classmates (install, add a contact,
+  send a message, verify a safety number). Note where people got stuck. That goes in §4
+  and §5.
 
 ## Team split (3–5 people)
 
 | Role | Owns |
 |---|---|
-| Protocol A | `X3dh.cs` and its tests, then helps with the ratchet. |
-| Protocol B | `Ratchet.cs` and its tests. |
-| Systems | `E2ee.Server`, `E2ee.Client`, persistence, demo script. |
-| Evaluation / report lead | Cross-check vectors, security demos, figures, report assembly. |
-| (5th) Stretch | Safety numbers and the group-messaging research spike. |
+| Protocol | `E2ee.Core` and its tests, the interop vectors, and the security demos. |
+| Session layer | `E2ee.Messaging`: local storage, session manager, relay client, safety numbers. |
+| Server | `E2ee.Server`: accounts, signed-request auth, push, deployment. |
+| App | `E2ee.App`: UI, onboarding, packaging. |
+| (5th) Evaluation / report lead | Usability check, figures, report assembly. Otherwise the protocol owner takes this on. |
 
 Everyone writes their own subsection of §3 and §4. One person edits for a single voice.
 
@@ -119,14 +200,18 @@ Everyone writes their own subsection of §3 and §4. One person edits for a sing
 
 | Risk | Mitigation |
 |---|---|
-| Ratchet edge cases (skipped keys across DH steps) eat weeks | Port the spec's pseudocode literally first, then refactor. The tests already exist. |
+| UI work eats the time for protocol and evaluation | The session layer and CLI come first (milestone 3), so the security story is complete before any UI. The UI stays a thin MVVM layer. |
+| State desync after a crash or a failed decrypt | Decrypt on a copy and commit atomically with the stored message (the ratchet already rolls back). End-to-end restart tests. |
+| Relay impersonation or inbox theft | Signed requests bound to the identity key, plus safety numbers for checking out of band. |
+| Private keys leaked from disk | Encrypt them at rest with an OS-keychain key. Say in the report what this does not protect against (malware running as the user). |
+| Cross-platform packaging pain (macOS signing, Gatekeeper) | Ship unsigned builds with run instructions. Signing is a stretch goal. Test on both OSes from milestone 4 onward. |
 | No reference vectors | Use the interop cross-check described above. |
-| Group messaging is too big | It's a stretch goal. Do safety numbers first. If groups slip, the report covers why (sender keys vs. MLS) in §5. |
-| Report crunch | Write §2 in week 1 and §3 by week 3. |
+| Group messaging is too big | It's a stretch goal. If groups slip, the report covers why (sender keys vs. MLS) in §5. |
+| Report crunch | Write §2 early and §3 by the end of milestone 3. Take screenshots as the app grows. |
 
 ## Workflow
 
-- Use `main` plus short feature branches and PRs, with one reviewer per PR, ideally the
-  other protocol person.
+- Use `main` plus short feature branches and PRs, with one reviewer per PR.
 - Run `dotnet test` before every merge. Add a test in the same PR as the code it covers.
+- Try the app on both macOS and Windows before merging a UI change.
 - Save AI transcripts as you go into `transcripts/`, then zip it at the end.

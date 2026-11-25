@@ -26,6 +26,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\E2ee.Core\E2ee.Core.csproj" />
     <ProjectReference Include="..\..\src\E2ee.Server\E2ee.Server.csproj" />
+    <ProjectReference Include="..\..\src\E2ee.Messaging\E2ee.Messaging.csproj" />
   </ItemGroup>
 
 </Project>
