@@ -1,0 +1,41 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             x:Class="E2ee.App.Views.AccountsView"
+             x:DataType="vm:AccountsViewModel">
+  <Border HorizontalAlignment="Center" VerticalAlignment="Center" Width="380" Padding="32"
+          CornerRadius="12" Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+    <StackPanel Spacing="14">
+      <TextBlock Classes="title" Text="Choose an account" />
+      <TextBlock Classes="muted" TextWrapping="Wrap"
+                 Text="Accounts live on this computer only. Each has its own password." />
+
+      <TextBlock Classes="muted" FontStyle="Italic" Text="No accounts on this computer yet." IsVisible="{Binding !HasAccounts}" />
+      <ScrollViewer MaxHeight="300" IsVisible="{Binding HasAccounts}">
+        <ItemsControl Name="AccountList" ItemsSource="{Binding Accounts}">
+          <ItemsControl.ItemTemplate>
+            <DataTemplate DataType="vm:AccountItem">
+              <Button Command="{Binding OpenCommand}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
+                      Background="Transparent" Padding="8,6" Margin="0,0,0,4">
+                <Grid ColumnDefinitions="Auto,*">
+                  <Border Width="34" Height="34" CornerRadius="17" Background="#3A76F0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="SemiBold"
+                               HorizontalAlignment="Center" VerticalAlignment="Center" />
+                  </Border>
+                  <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                    <TextBlock Classes="muted" FontSize="12" Text="{Binding Detail}" />
+                  </StackPanel>
+                </Grid>
+              </Button>
+            </DataTemplate>
+          </ItemsControl.ItemTemplate>
+        </ItemsControl>
+      </ScrollViewer>
+
+      <Button Name="NewAccountButton" Content="Create a new account" Command="{Binding CreateNewCommand}"
+              HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Classes="accent" />
+      <Button Name="AccountsBackButton" Content="Back" Command="{Binding BackCommand}" Classes="link" HorizontalAlignment="Center" />
+    </StackPanel>
+  </Border>
+</UserControl>

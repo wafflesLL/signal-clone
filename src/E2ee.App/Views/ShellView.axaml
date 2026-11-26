@@ -1,0 +1,407 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             x:Class="E2ee.App.Views.ShellView"
+             x:DataType="vm:ShellViewModel">
+  <UserControl.Styles>
+    <Style Selector="Border.bubble">
+      <Setter Property="MaxWidth" Value="460" />
+      <Setter Property="CornerRadius" Value="14" />
+      <Setter Property="Padding" Value="12,8" />
+      <Setter Property="Margin" Value="0,3" />
+      <Setter Property="HorizontalAlignment" Value="Left" />
+      <Setter Property="Background" Value="{DynamicResource IncomingBubbleBrush}" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing">
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundAccentBrush}" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing SelectableTextBlock, Border.bubble.outgoing TextBlock">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Border.bubble.failed">
+      <Setter Property="Background" Value="#D13438" />
+    </Style>
+    <Style Selector="TextBlock.meta">
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="Opacity" Value="0.7" />
+      <Setter Property="HorizontalAlignment" Value="Right" />
+      <Setter Property="Margin" Value="0,2,0,0" />
+    </Style>
+    <Style Selector="Border.badge">
+      <Setter Property="CornerRadius" Value="9" />
+      <Setter Property="Padding" Value="7,1" />
+    </Style>
+    <Style Selector="Border.badge.verified">
+      <Setter Property="Background" Value="#DFF6DD" />
+    </Style>
+    <Style Selector="Border.badge.verified TextBlock">
+      <Setter Property="Foreground" Value="#0E6027" />
+      <Setter Property="FontSize" Value="11" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Border.badge.request">
+      <Setter Property="Background" Value="#DCE8FB" />
+      <Setter Property="Padding" Value="6,0" />
+    </Style>
+    <Style Selector="Border.badge.request TextBlock">
+      <Setter Property="Foreground" Value="#0B3D91" />
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="Button.image">
+      <Setter Property="Padding" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="ClipToBounds" Value="True" />
+    </Style>
+    <Style Selector="Border.filecard">
+      <Setter Property="Padding" Value="10,8" />
+      <Setter Property="CornerRadius" Value="8" />
+      <Setter Property="Background" Value="#22000000" />
+    </Style>
+    <Style Selector="Border.reactions">
+      <Setter Property="Padding" Value="6,1" />
+      <Setter Property="CornerRadius" Value="10" />
+      <Setter Property="Background" Value="#26000000" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing Button.link">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Button.react">
+      <Setter Property="Padding" Value="4,0" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="Opacity" Value="0.6" />
+    </Style>
+    <Style Selector="Button.react:pointerover">
+      <Setter Property="Opacity" Value="1" />
+    </Style>
+    <Style Selector="Border.bubble.outgoing Button.react">
+      <Setter Property="Foreground" Value="White" />
+    </Style>
+    <Style Selector="Border.pane">
+      <Setter Property="Background" Value="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}" />
+    </Style>
+  </UserControl.Styles>
+
+  <Grid ColumnDefinitions="290,*">
+
+    <!-- Contacts -->
+    <Border Classes="pane" Grid.Column="0">
+      <DockPanel>
+        <StackPanel DockPanel.Dock="Top" Margin="16,16,16,8" Spacing="10">
+          <StackPanel Spacing="2">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{Binding Me}" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+              <Button Name="LogOutButton" Grid.Column="1" Content="Log out" Command="{Binding OpenLogOutCommand}"
+                      Padding="10,3" FontSize="12" ToolTip.Tip="Log out and erase this account from this computer" />
+            </Grid>
+            <StackPanel Orientation="Horizontal" Spacing="6">
+              <Ellipse Width="8" Height="8" Fill="#2E9E6B" IsVisible="{Binding RelayOnline}" VerticalAlignment="Center" />
+              <Ellipse Width="8" Height="8" Fill="#D13438" IsVisible="{Binding !RelayOnline}" VerticalAlignment="Center" />
+              <TextBlock Classes="muted" FontSize="12" Text="{Binding ServerText}" IsVisible="{Binding RelayOnline}" />
+              <TextBlock Classes="muted" FontSize="12" Text="Relay unreachable, retrying…" IsVisible="{Binding !RelayOnline}" />
+            </StackPanel>
+          </StackPanel>
+          <Grid ColumnDefinitions="*,6,Auto">
+            <TextBox Name="NewContactBox" Text="{Binding NewContact}" Watermark="Send a request by username">
+              <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding AddContactCommand}" />
+              </TextBox.KeyBindings>
+            </TextBox>
+            <Button Grid.Column="2" Content="Add" Command="{Binding AddContactCommand}" />
+          </Grid>
+          <Button Name="NewGroupButton" Content="New group" Command="{Binding OpenNewGroupCommand}"
+                  HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+        </StackPanel>
+
+        <TextBlock DockPanel.Dock="Top" Classes="muted" Margin="16,8" TextWrapping="Wrap"
+                   Text="No conversations yet. Add someone by their username, or start a group."
+                   IsVisible="{Binding !Contacts.Count}" />
+
+        <ListBox Name="ContactList" ItemsSource="{Binding Contacts}" SelectedItem="{Binding Selected}" Background="Transparent">
+          <ListBox.ItemTemplate>
+            <DataTemplate DataType="vm:ContactViewModel">
+              <Grid ColumnDefinitions="Auto,*,Auto" RowDefinitions="21,21" Margin="0,4">
+                <Border Grid.RowSpan="2" Width="40" Height="40" CornerRadius="20" Background="{Binding AvatarBrush}" VerticalAlignment="Center">
+                  <TextBlock Text="{Binding Initial}" Foreground="White" FontWeight="SemiBold"
+                             HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+                <StackPanel Grid.Column="1" Margin="10,0,6,0" Orientation="Horizontal" Spacing="5" VerticalAlignment="Bottom">
+                  <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
+                  <TextBlock Text="✓" Foreground="#2E9E6B" FontWeight="Bold" IsVisible="{Binding Verified}" ToolTip.Tip="Safety number verified" />
+                  <TextBlock Text="⚠" Foreground="#D13438" IsVisible="{Binding IdentityChanged}" ToolTip.Tip="Safety number changed" />
+                  <Border Classes="badge request" IsVisible="{Binding IsIncomingRequest}" VerticalAlignment="Center">
+                    <TextBlock Text="Request" />
+                  </Border>
+                </StackPanel>
+                <TextBlock Grid.Column="2" Classes="muted" FontSize="11" Text="{Binding TimeText}" VerticalAlignment="Bottom" HorizontalAlignment="Right" />
+                <TextBlock Grid.Row="1" Grid.Column="1" Margin="10,1,6,0" Classes="muted" FontSize="13"
+                           Text="{Binding Preview}" TextTrimming="CharacterEllipsis" VerticalAlignment="Top" />
+                <Border Grid.Row="1" Grid.Column="2" IsVisible="{Binding HasUnread}" CornerRadius="9" MinWidth="18" Height="18"
+                        Padding="5,0" Background="{DynamicResource SystemControlBackgroundAccentBrush}" HorizontalAlignment="Right">
+                  <TextBlock Text="{Binding Unread}" Foreground="White" FontSize="11" HorizontalAlignment="Center" VerticalAlignment="Center" />
+                </Border>
+              </Grid>
+            </DataTemplate>
+          </ListBox.ItemTemplate>
+        </ListBox>
+      </DockPanel>
+    </Border>
+
+    <!-- Conversation -->
+    <DockPanel Grid.Column="1" DragDrop.AllowDrop="True" Background="Transparent">
+      <Border DockPanel.Dock="Top" IsVisible="{Binding HasNotice}" Background="#FFF4CE" Padding="12,8">
+        <Grid ColumnDefinitions="*,Auto">
+          <TextBlock Text="{Binding Notice}" Foreground="#3B2F00" TextWrapping="Wrap" VerticalAlignment="Center" />
+          <Button Grid.Column="1" Content="Dismiss" Command="{Binding DismissNoticeCommand}" Margin="8,0,0,0" />
+        </Grid>
+      </Border>
+
+      <TextBlock Classes="muted" HorizontalAlignment="Center" VerticalAlignment="Center"
+                 Text="Pick a conversation, or start one on the left." IsVisible="{Binding !HasSelection}" />
+
+      <Panel IsVisible="{Binding HasSelection}">
+        <DockPanel>
+          <Border DockPanel.Dock="Top" Padding="20,12" BorderThickness="0,0,0,1"
+                  BorderBrush="{DynamicResource SystemControlForegroundBaseLowBrush}">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel>
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                  <TextBlock Text="{Binding Selected.Title, FallbackValue=''}" FontSize="17" FontWeight="SemiBold" />
+                  <Border Classes="badge verified" IsVisible="{Binding Selected.Verified, FallbackValue=False}" VerticalAlignment="Center">
+                    <TextBlock Text="✓ Verified" />
+                  </Border>
+                </StackPanel>
+                <TextBlock Classes="muted" FontSize="12" Text="🔒 End-to-end encrypted" IsVisible="{Binding Selected.IsDirect, FallbackValue=False}" />
+                <TextBlock Classes="muted" FontSize="12" Text="{Binding Selected.MembersText, StringFormat='🔒 {0}', FallbackValue=''}"
+                           IsVisible="{Binding Selected.IsGroup, FallbackValue=False}" TextTrimming="CharacterEllipsis" />
+              </StackPanel>
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                <Button Name="SafetyButton" Content="Safety number" Command="{Binding ShowSafetyNumberCommand}"
+                        IsVisible="{Binding ShowSafetyButton}" />
+                <Button Name="AddPeopleButton" Content="Add people" Command="{Binding OpenAddMembersCommand}"
+                        IsVisible="{Binding CanManageGroup}" />
+                <Button Name="LeaveGroupButton" Content="Leave" Command="{Binding LeaveGroupCommand}"
+                        IsVisible="{Binding CanManageGroup}" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="#FDE7E9" Padding="20,10"
+                  IsVisible="{Binding Selected.IdentityChanged, FallbackValue=False}">
+            <Grid ColumnDefinitions="*,Auto">
+              <StackPanel Spacing="2">
+                <TextBlock Text="Safety number changed" FontWeight="SemiBold" Foreground="#A4262C" />
+                <TextBlock TextWrapping="Wrap" Foreground="#3B0A0D" FontSize="13"
+                           Text="Their identity key is not the one you trusted. They may have reinstalled, or someone may be impersonating them. New messages from them are on hold and sending is paused until you review it." />
+              </StackPanel>
+              <Button Name="ReviewKeyButton" Grid.Column="1" Content="Review" Command="{Binding ShowSafetyNumberCommand}"
+                      Background="#D13438" Foreground="White" Margin="12,0,0,0" VerticalAlignment="Center" />
+            </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,12"
+                  IsVisible="{Binding ShowIncomingRequest}">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{Binding IncomingRequestText}" TextWrapping="Wrap" VerticalAlignment="Center" FontSize="13" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="12,0,0,0" VerticalAlignment="Center">
+                <Button Name="DeclineRequestButton" Content="Decline" Command="{Binding DeclineRequestCommand}"
+                        ToolTip.Tip="Hide this chat and block them. They aren't told." />
+                <Button Name="AcceptRequestButton" Content="Accept" Command="{Binding AcceptRequestCommand}" Classes="accent" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,10"
+                  IsVisible="{Binding ShowOutgoingRequest}">
+            <TextBlock Text="{Binding OutgoingRequestText}" TextWrapping="Wrap" FontSize="13" />
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,10"
+                  IsVisible="{Binding Selected.HasLeft, FallbackValue=False}">
+            <TextBlock TextWrapping="Wrap" FontSize="13"
+                       Text="You left this group. You can still read the history, but you won't get new messages." />
+          </Border>
+
+          <Grid DockPanel.Dock="Bottom" ColumnDefinitions="Auto,8,*,8,Auto" Margin="16,8,16,16" IsEnabled="{Binding CanCompose}">
+            <Button Name="AttachButton" Content="📎" FontSize="16" Padding="10,4" VerticalAlignment="Bottom" Click="OnAttachClick"
+                    IsEnabled="{Binding !IsUploading}" ToolTip.Tip="Send a photo, video or document (or drop files here)" />
+            <TextBox Grid.Column="2" Name="DraftBox" Text="{Binding Draft}" Watermark="Message" MaxHeight="120" TextWrapping="Wrap"
+                     MaxLength="16000">
+              <TextBox.KeyBindings>
+                <KeyBinding Gesture="Enter" Command="{Binding SendCommand}" />
+              </TextBox.KeyBindings>
+            </TextBox>
+            <Button Grid.Column="4" Content="Send" Command="{Binding SendCommand}" Classes="accent" VerticalAlignment="Bottom" />
+          </Grid>
+
+          <StackPanel DockPanel.Dock="Bottom" Orientation="Horizontal" Spacing="8" Margin="20,4,20,0" IsVisible="{Binding IsUploading}">
+            <ProgressBar IsIndeterminate="True" Width="120" VerticalAlignment="Center" />
+            <TextBlock Classes="muted" FontSize="12" Text="Encrypting and uploading…" />
+          </StackPanel>
+
+          <ScrollViewer Name="MessageScroller" Padding="20,10">
+            <ItemsControl ItemsSource="{Binding Messages}">
+              <ItemsControl.ItemTemplate>
+                <DataTemplate DataType="vm:MessageViewModel">
+                  <Panel>
+                    <TextBlock Classes="muted" FontSize="12" Margin="0,8" HorizontalAlignment="Center" TextWrapping="Wrap"
+                               Text="{Binding Text}" IsVisible="{Binding IsEvent}" />
+                    <Border Classes="bubble" Classes.outgoing="{Binding Outgoing}" Classes.failed="{Binding IsFailed}"
+                            IsVisible="{Binding IsBubble}">
+                      <StackPanel Spacing="2">
+                        <TextBlock Name="SenderName" Text="{Binding Sender}" FontSize="12" FontWeight="Bold"
+                                   Foreground="{Binding SenderBrush}" Margin="0,0,0,2" IsVisible="{Binding ShowSender}" />
+
+                        <!-- Attachment: the image itself, a file card for videos, or its status -->
+                        <Button Classes="image" Command="{Binding OpenCommand}" IsVisible="{Binding HasImage}" ToolTip.Tip="Open">
+                          <Image Source="{Binding Image}" MaxWidth="320" MaxHeight="320" Stretch="Uniform" />
+                        </Button>
+                        <Border Classes="filecard" IsVisible="{Binding ShowFileCard}">
+                          <StackPanel Spacing="6">
+                            <TextBlock Text="{Binding FileLabel}" TextTrimming="CharacterEllipsis" MaxWidth="300" />
+                            <StackPanel Orientation="Horizontal" Spacing="6">
+                              <Button Content="Open" Command="{Binding OpenCommand}" />
+                              <Button Content="Save" Command="{Binding SaveCommand}" />
+                            </StackPanel>
+                          </StackPanel>
+                        </Border>
+                        <StackPanel Orientation="Horizontal" Spacing="6" IsVisible="{Binding IsDownloading}">
+                          <ProgressBar IsIndeterminate="True" Width="60" VerticalAlignment="Center" />
+                          <TextBlock FontSize="12" Text="Downloading…" />
+                        </StackPanel>
+                        <TextBlock FontSize="12" TextWrapping="Wrap" IsVisible="{Binding AttachmentFailed}"
+                                   Text="⚠ This attachment couldn't be downloaded (it expired, or was altered on the way)." />
+
+                        <SelectableTextBlock Text="{Binding DisplayText}" TextWrapping="Wrap" IsVisible="{Binding HasText}" />
+                        <Button Name="ShowMoreButton" Classes="link" Content="{Binding ShowMoreText}" Command="{Binding ToggleExpandedCommand}"
+                                IsVisible="{Binding IsLong}" />
+
+                        <Grid ColumnDefinitions="Auto,*,Auto" Margin="0,2,0,0">
+                          <Border Classes="reactions" IsVisible="{Binding HasReactions}" ToolTip.Tip="{Binding ReactionsTip}">
+                            <TextBlock Text="{Binding ReactionsText}" FontSize="13" />
+                          </Border>
+                          <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="4" VerticalAlignment="Bottom">
+                            <Button Name="ReactButton" Classes="react" Content="☺" ToolTip.Tip="React">
+                              <Button.Flyout>
+                                <Flyout Placement="Top">
+                                  <ItemsControl ItemsSource="{x:Static vm:MessageViewModel.QuickReactions}" x:DataType="vm:MessageViewModel">
+                                    <ItemsControl.ItemsPanel>
+                                      <ItemsPanelTemplate><StackPanel Orientation="Horizontal" Spacing="2" /></ItemsPanelTemplate>
+                                    </ItemsControl.ItemsPanel>
+                                    <ItemsControl.ItemTemplate>
+                                      <DataTemplate x:DataType="x:String">
+                                        <Button Content="{Binding}" FontSize="20" Padding="6,2" Background="Transparent"
+                                                Command="{Binding $parent[ItemsControl].((vm:MessageViewModel)DataContext).ReactCommand}"
+                                                CommandParameter="{Binding}" />
+                                      </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                  </ItemsControl>
+                                </Flyout>
+                              </Button.Flyout>
+                            </Button>
+                            <TextBlock Classes="meta" Text="{Binding MetaText}" VerticalAlignment="Center" Margin="0" />
+                          </StackPanel>
+                        </Grid>
+                      </StackPanel>
+                    </Border>
+                  </Panel>
+                </DataTemplate>
+              </ItemsControl.ItemTemplate>
+            </ItemsControl>
+          </ScrollViewer>
+        </DockPanel>
+
+        <!-- Safety number panel, over the conversation -->
+        <Border Background="#99000000" IsVisible="{Binding IsSafetyOpen}">
+          <Border Width="440" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+                  Background="{DynamicResource SystemControlBackgroundAltHighBrush}" DataContext="{Binding Safety}"
+                  x:DataType="vm:SafetyNumberViewModel">
+            <StackPanel Spacing="16">
+              <TextBlock Classes="title" FontSize="20" Text="Safety number" IsVisible="{Binding IsCurrentKey}" />
+              <TextBlock Classes="title" FontSize="20" Text="New safety number" Foreground="#A4262C" IsVisible="{Binding IsKeyChange}" />
+              <TextBlock TextWrapping="Wrap" Text="{Binding Explanation}" />
+              <Border Padding="16,12" CornerRadius="8" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}">
+                <ItemsControl ItemsSource="{Binding Rows}" HorizontalAlignment="Center">
+                  <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="x:String">
+                      <TextBlock Text="{Binding}" FontFamily="Menlo, Consolas, monospace" FontSize="20" Margin="0,3"
+                                 HorizontalAlignment="Center" />
+                    </DataTemplate>
+                  </ItemsControl.ItemTemplate>
+                </ItemsControl>
+              </Border>
+
+              <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" IsVisible="{Binding IsUnverified}">
+                <Button Content="Close" Command="{Binding CloseCommand}" />
+                <Button Name="MarkVerifiedButton" Content="Mark as verified" Command="{Binding MarkVerifiedCommand}" Classes="accent" />
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right" IsVisible="{Binding IsVerified}">
+                <Button Content="Clear verification" Command="{Binding ClearVerifiedCommand}" />
+                <Button Content="Close" Command="{Binding CloseCommand}" Classes="accent" />
+              </StackPanel>
+              <StackPanel Spacing="8" IsVisible="{Binding IsKeyChange}">
+                <Button Name="TrustVerifyButton" Content="The numbers match: trust and mark verified" Command="{Binding TrustAndVerifyCommand}"
+                        Classes="accent" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Content="Trust without verifying" Command="{Binding TrustWithoutVerifyingCommand}"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+                <Button Content="Not now" Command="{Binding CloseCommand}"
+                        HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" />
+              </StackPanel>
+            </StackPanel>
+          </Border>
+        </Border>
+      </Panel>
+    </DockPanel>
+
+    <!-- New group / add people, over everything -->
+    <Border Grid.ColumnSpan="2" Background="#99000000" IsVisible="{Binding IsGroupFormOpen}">
+      <Border Width="420" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Background="{DynamicResource SystemControlBackgroundAltHighBrush}" DataContext="{Binding GroupForm}"
+              x:DataType="vm:GroupFormViewModel">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="title" FontSize="20" Text="{Binding Heading}" />
+          <TextBox Name="GroupNameBox" Text="{Binding Name}" Watermark="Group name" IsVisible="{Binding IsNew}" MaxLength="64" />
+          <TextBox Name="GroupMembersBox" Text="{Binding Members}" Watermark="Usernames, separated by commas">
+            <TextBox.KeyBindings>
+              <KeyBinding Gesture="Enter" Command="{Binding SubmitCommand}" />
+            </TextBox.KeyBindings>
+          </TextBox>
+          <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                     Text="Each message is encrypted separately for every member. The relay never learns the group exists." />
+          <TextBlock Text="{Binding Error}" Foreground="#D13438" TextWrapping="Wrap" IsVisible="{Binding HasError}" />
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Content="Cancel" Command="{Binding CloseCommand}" />
+            <Button Name="GroupSubmitButton" Content="{Binding SubmitText}" Command="{Binding SubmitCommand}" Classes="accent" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+
+    <!-- Log out, over everything -->
+    <Border Grid.ColumnSpan="2" Background="#99000000" IsVisible="{Binding IsLogOutOpen}">
+      <Border Width="440" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="title" FontSize="20" Text="Log out?" />
+          <TextBlock TextWrapping="Wrap"
+                     Text="Your keys exist only on this computer, so logging out erases this account here: your chats, files, contacts, and keys. This can't be undone." />
+          <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                     Text="Your username is released on the relay, so you (or someone else) can sign up with it again. Contacts will see a new safety number if that happens." />
+          <TextBlock Name="LogOutError" Text="{Binding LogOutError}" Foreground="#D13438" TextWrapping="Wrap" IsVisible="{Binding HasLogOutError}" />
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsLoggingOut}" />
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Content="Cancel" Command="{Binding CancelLogOutCommand}" />
+            <Button Name="LogOutAnywayButton" Content="Log out anyway" Command="{Binding LogOutAnywayCommand}" IsVisible="{Binding HasLogOutError}" />
+            <Button Name="ConfirmLogOutButton" Content="Log out and erase" Command="{Binding LogOutCommand}"
+                    Background="#C42B1C" Foreground="White" IsVisible="{Binding !HasLogOutError}" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+  </Grid>
+</UserControl>

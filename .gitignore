@@ -1,13 +1,16 @@
-.venv/
-__pycache__/
-*.pyc
-.pytest_cache/
-*.egg-info/
-build/
+bin/
+obj/
+*.user
+.vs/
+TestResults/
 dist/
 # local client/server state: may contain private keys
 *.db
+*.sqlite3
+*-wal
+*-shm
 state/
+relay-attachments/
 # LaTeX build output
 report/*.aux
 report/*.log

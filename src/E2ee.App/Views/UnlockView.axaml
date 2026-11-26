@@ -1,0 +1,43 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             x:Class="E2ee.App.Views.UnlockView"
+             x:DataType="vm:UnlockViewModel">
+  <Border HorizontalAlignment="Center" VerticalAlignment="Center" Width="380" Padding="32"
+          CornerRadius="12" Background="{DynamicResource SystemControlBackgroundChromeMediumLowBrush}">
+    <StackPanel Spacing="14">
+      <TextBlock Name="UnlockHeading" Classes="title" Text="{Binding Heading}" TextTrimming="CharacterEllipsis" />
+      <TextBlock Classes="muted" TextWrapping="Wrap"
+                 Text="Enter your password to open your messages on this computer." />
+
+      <StackPanel Spacing="14" IsVisible="{Binding !ConfirmingErase}">
+        <TextBox Name="UnlockPasswordBox" Text="{Binding Password}" PasswordChar="•" Watermark="Password">
+          <TextBox.KeyBindings>
+            <KeyBinding Gesture="Enter" Command="{Binding UnlockCommand}" />
+          </TextBox.KeyBindings>
+        </TextBox>
+        <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding HasError}" />
+        <Button Name="UnlockButton" Content="Unlock" Command="{Binding UnlockCommand}" IsDefault="True"
+                HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Classes="accent" />
+        <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" />
+        <StackPanel Orientation="Horizontal" Spacing="20" HorizontalAlignment="Center">
+          <Button Name="ForgotPasswordButton" Content="Forgot password?" Command="{Binding ForgotPasswordCommand}" Classes="link" />
+          <Button Name="OtherAccountButton" Content="Use another account" Command="{Binding UseOtherAccountCommand}" Classes="link"
+                  IsVisible="{Binding CanUseOtherAccount}" />
+        </StackPanel>
+      </StackPanel>
+
+      <StackPanel Spacing="12" IsVisible="{Binding ConfirmingErase}">
+        <TextBlock TextWrapping="Wrap"
+                   Text="There's no way to recover it: the password is the only thing that can decrypt this account's keys. You can erase the account from this computer and sign up again." />
+        <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                   Text="Your chats, files, and contacts here will be deleted. The old username stays taken on the relay, so you'll need a new one." />
+        <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+          <Button Content="Cancel" Command="{Binding CancelEraseCommand}" />
+          <Button Name="EraseButton" Content="Erase and start over" Command="{Binding EraseCommand}"
+                  Background="#C42B1C" Foreground="White" />
+        </StackPanel>
+      </StackPanel>
+    </StackPanel>
+  </Border>
+</UserControl>

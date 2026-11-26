@@ -1,0 +1,60 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="using:E2ee.App.ViewModels"
+             xmlns:v="using:E2ee.App.Views"
+             x:Class="E2ee.App.App"
+             Name="E2EE Messenger"
+             RequestedThemeVariant="Default">
+
+  <Application.DataTemplates>
+    <DataTemplate DataType="vm:OnboardingViewModel"><v:OnboardingView /></DataTemplate>
+    <DataTemplate DataType="vm:UnlockViewModel"><v:UnlockView /></DataTemplate>
+    <DataTemplate DataType="vm:AccountsViewModel"><v:AccountsView /></DataTemplate>
+    <DataTemplate DataType="vm:ShellViewModel"><v:ShellView /></DataTemplate>
+    <DataTemplate DataType="vm:ErrorViewModel"><v:ErrorView /></DataTemplate>
+  </Application.DataTemplates>
+
+  <Application.Resources>
+    <ResourceDictionary>
+      <!-- Incoming bubbles. Sender-name colors (SenderColors.cs) are checked against these. -->
+      <ResourceDictionary.ThemeDictionaries>
+        <ResourceDictionary x:Key="Light">
+          <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#E9E9EB" />
+          <SolidColorBrush x:Key="LinkBrush" Color="#1558B0" />
+        </ResourceDictionary>
+        <ResourceDictionary x:Key="Dark">
+          <SolidColorBrush x:Key="IncomingBubbleBrush" Color="#3A3A3C" />
+          <SolidColorBrush x:Key="LinkBrush" Color="#64B5F6" />
+        </ResourceDictionary>
+      </ResourceDictionary.ThemeDictionaries>
+    </ResourceDictionary>
+  </Application.Resources>
+
+  <Application.Styles>
+    <FluentTheme />
+    <Style Selector="TextBlock.title">
+      <Setter Property="FontSize" Value="24" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
+    <Style Selector="TextBlock.muted">
+      <Setter Property="Opacity" Value="0.65" />
+    </Style>
+    <!-- A text button: "Show more", "Forgot password?" -->
+    <Style Selector="Button.link">
+      <Setter Property="Padding" Value="0,2" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="{DynamicResource LinkBrush}" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
+    </Style>
+    <Style Selector="TextBlock.error">
+      <Setter Property="Foreground" Value="#D13438" />
+      <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+  </Application.Styles>
+</Application>
