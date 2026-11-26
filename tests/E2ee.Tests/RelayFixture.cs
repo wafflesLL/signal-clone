@@ -32,11 +32,34 @@ public sealed class RelayFixture : IDisposable
         return m;
     }
 
-    public async Task<Messenger> Register(string name, PrekeyPolicy? prekeys = null)
+    /// <summary>
+    /// Registers a profile. Unless <paramref name="friends"/> is false it is made friends
+    /// with every profile still open, so tests about messaging don't each need the request
+    /// round trip (which <see cref="Befriend"/> and the request tests exercise for real).
+    /// </summary>
+    public async Task<Messenger> Register(string name, PrekeyPolicy? prekeys = null, bool friends = true)
     {
         var m = Open(name, prekeys);
         await m.RegisterAsync(name);
+        if (friends)
+            foreach (var other in _open.Where(o => o != m && o.IsRegistered && !_strangers.Contains(o)).ToList())
+            {
+                await m.MakeFriendForTestAsync(other.Username!);
+                await other.MakeFriendForTestAsync(name);
+            }
+        else _strangers.Add(m);
         return m;
+    }
+
+    private readonly HashSet<Messenger> _strangers = new();
+
+    /// <summary>The real way: <paramref name="from"/> sends a request and <paramref name="to"/> accepts it.</summary>
+    public static async Task Befriend(Messenger from, Messenger to)
+    {
+        await from.AddContactAsync(to.Username!);
+        await to.SyncAsync();
+        await to.AcceptRequestAsync(from.Username!);
+        await from.SyncAsync();
     }
 
     /// <summary>Simulates quitting the app: closes the profile so it can be reopened.</summary>

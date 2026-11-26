@@ -37,6 +37,7 @@ public sealed class AppTests : IDisposable
     {
         HttpClientFactory = _relay.Factory.CreateClient,
         KeyStore = new InMemoryMasterKeyStore(_relay.ProfileDir(profile)),
+        PasswordCost = PasswordCost.ForTests,
     };
 
     private static Window Show(MainWindowViewModel vm)
@@ -88,6 +89,10 @@ public sealed class AppTests : IDisposable
 
         Type(window, Find<TextBox>(window, "UsernameBox"), "Alice");
         Assert.Equal("Alice", onboarding.Username);
+        Assert.False(onboarding.RegisterCommand.CanExecute(null)); // no password yet
+        Type(window, Find<TextBox>(window, "PasswordBox"), "correct horse");
+        Type(window, Find<TextBox>(window, "ConfirmPasswordBox"), "correct horse");
+        Assert.True(onboarding.RegisterCommand.CanExecute(null));
         Screenshot(window, "1-sign-up");
 
         await onboarding.RegisterCommand.ExecuteAsync(null);
@@ -95,7 +100,197 @@ public sealed class AppTests : IDisposable
         await vm.ShellReady;
         Assert.Equal("alice", shell.Me);
         Assert.Equal("E2EE Messenger — alice", vm.Title);
+        Assert.True(PasswordMasterKeyStore.IsLocked(_relay.ProfileDir("alice")));
         Screenshot(window, "2-empty-shell");
+        vm.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task SignUpChecksThePassword()
+    {
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        Show(vm);
+        var onboarding = Assert.IsType<OnboardingViewModel>(vm.Current);
+        onboarding.Username = "alice";
+
+        (onboarding.Password, onboarding.ConfirmPassword) = ("short", "short");
+        await onboarding.RegisterCommand.ExecuteAsync(null);
+        Assert.Contains("at least 8", onboarding.Error);
+
+        (onboarding.Password, onboarding.ConfirmPassword) = ("correct horse", "correct hose");
+        await onboarding.RegisterCommand.ExecuteAsync(null);
+        Assert.Contains("don't match", onboarding.Error);
+        Assert.False(Directory.Exists(_relay.ProfileDir("alice"))); // nothing written yet
+        Assert.IsType<OnboardingViewModel>(vm.Current);
+    }
+
+    [AvaloniaFact]
+    public async Task PasswordLocksTheApp()
+    {
+        var bob = await _relay.Register("bob");
+        var options = Options("alice");
+        var vm = new MainWindowViewModel(options, startPolling: false);
+        var signUp = Assert.IsType<OnboardingViewModel>(vm.Current);
+        (signUp.Username, signUp.Password, signUp.ConfirmPassword) = ("alice", "correct horse", "correct horse");
+        await signUp.RegisterCommand.ExecuteAsync(null);
+        await vm.ShellReady;
+        var first = Assert.IsType<ShellViewModel>(vm.Current);
+        await bob.AddContactAsync("alice");
+        await first.SyncNowAsync();
+        first.Selected = Assert.Single(first.Contacts);
+        await first.AcceptRequestCommand.ExecuteAsync(null);
+        await bob.SyncAsync();
+        await bob.SendAsync("alice", "only readable after unlocking");
+        await first.SyncNowAsync();
+        vm.Dispose();
+
+        // The master key is stored only under the password: no other key store has it.
+        Assert.Throws<MessengerException>(() => Messenger.Open(options.ToMessengerOptions(null, null) with { KeyStore = new InMemoryMasterKeyStore("nothing-here") }).Dispose());
+
+        // Reopening asks for the password.
+        vm = new MainWindowViewModel(options, startPolling: false);
+        var window = Show(vm);
+        var unlock = Assert.IsType<UnlockViewModel>(vm.Current);
+        Type(window, Find<TextBox>(window, "UnlockPasswordBox"), "wrong password", enter: true);
+        await Settle();
+        Assert.Equal("That password is incorrect.", unlock.Error);
+        Assert.Equal("", unlock.Password);
+        Screenshot(window, "15-unlock");
+
+        Type(window, Find<TextBox>(window, "UnlockPasswordBox"), "correct horse", enter: true);
+        await Settle();
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        Assert.Equal("alice", shell.Me);
+        Assert.Equal("only readable after unlocking", shell.Contacts.Single().Preview);
+        vm.Dispose();
+    }
+
+    private AppOptions AccountOptions(string profile) => new(_relay.ProfileDir(profile), false, "http://localhost/")
+    {
+        HttpClientFactory = _relay.Factory.CreateClient,
+        PasswordCost = PasswordCost.ForTests,
+        ProfilesRoot = Path.GetDirectoryName(_relay.ProfileDir(profile)),
+    };
+
+    private static async Task SignUp(MainWindowViewModel vm, string name, string password)
+    {
+        var signUp = Assert.IsType<OnboardingViewModel>(vm.Current);
+        (signUp.Username, signUp.Password, signUp.ConfirmPassword) = (name, password, password);
+        await signUp.RegisterCommand.ExecuteAsync(null);
+        await vm.ShellReady;
+        Assert.Equal(name, Assert.IsType<ShellViewModel>(vm.Current).Me);
+    }
+
+    [AvaloniaFact]
+    public async Task SignInWithAnotherAccount()
+    {
+        var first = AccountOptions("default");
+        var vm = new MainWindowViewModel(first, startPolling: false);
+        // With no other accounts yet, sign-up doesn't offer to switch.
+        Assert.False(Assert.IsType<OnboardingViewModel>(vm.Current).CanUseOtherAccount);
+        await SignUp(vm, "alice", "alice password");
+        vm.Dispose();
+
+        // Next launch: alice's unlock screen offers another account.
+        vm = new MainWindowViewModel(first, startPolling: false);
+        var window = Show(vm);
+        var unlock = Assert.IsType<UnlockViewModel>(vm.Current);
+        Assert.Equal("Unlock alice", unlock.Heading);
+        Assert.True(Find<Button>(window, "OtherAccountButton").IsVisible);
+        Screenshot(window, "17-unlock-with-switch");
+
+        Find<Button>(window, "OtherAccountButton").Command!.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+        var picker = Assert.IsType<AccountsViewModel>(vm.Current);
+        Assert.Equal(["alice"], picker.Accounts.Select(a => a.Title));
+        picker.CreateNewCommand.Execute(null);
+        var signUp = Assert.IsType<OnboardingViewModel>(vm.Current);
+        Assert.True(signUp.CanUseOtherAccount); // can go back to alice instead
+        await SignUp(vm, "bob", "bob password");
+        vm.Dispose();
+
+        // The app reopens bob's account, the one used last.
+        var reopened = AppOptions.Parse([], first.ProfilesRoot!);
+        Assert.Equal("bob", reopened.AccountName);
+
+        // From bob's unlock screen, switch to alice and unlock her.
+        vm = new MainWindowViewModel(reopened with { HttpClientFactory = _relay.Factory.CreateClient, PasswordCost = PasswordCost.ForTests },
+            startPolling: false);
+        window = Show(vm);
+        Assert.Equal("Unlock bob", Assert.IsType<UnlockViewModel>(vm.Current).Heading);
+        Assert.IsType<UnlockViewModel>(vm.Current).UseOtherAccountCommand.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+        picker = Assert.IsType<AccountsViewModel>(vm.Current);
+        Assert.Equal(["alice", "bob"], picker.Accounts.Select(a => a.Title));
+        Assert.Equal("Password protected · last used", picker.Accounts[1].Detail);
+        Screenshot(window, "18-choose-account");
+
+        picker.Accounts[0].OpenCommand.Execute(null);
+        unlock = Assert.IsType<UnlockViewModel>(vm.Current);
+        Assert.Equal("Unlock alice", unlock.Heading);
+        unlock.Password = "bob password";
+        await unlock.UnlockCommand.ExecuteAsync(null);
+        Assert.Equal("That password is incorrect.", unlock.Error); // each account has its own
+        unlock.Password = "alice password";
+        await unlock.UnlockCommand.ExecuteAsync(null);
+        await vm.ShellReady;
+        Assert.Equal("alice", Assert.IsType<ShellViewModel>(vm.Current).Me);
+        Assert.Equal("alice", AppOptions.Parse([], first.ProfilesRoot!).AccountName);
+
+        // Back from the picker returns to where you were.
+        vm.Dispose();
+        vm = new MainWindowViewModel(reopened with { HttpClientFactory = _relay.Factory.CreateClient }, startPolling: false);
+        Assert.IsType<UnlockViewModel>(vm.Current).UseOtherAccountCommand.Execute(null);
+        Assert.IsType<AccountsViewModel>(vm.Current).BackCommand.Execute(null);
+        Assert.Equal("Unlock bob", Assert.IsType<UnlockViewModel>(vm.Current).Heading);
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void ASingleDataDirectoryCannotSwitchAccounts()
+    {
+        var o = AppOptions.Parse(["--data-dir", _relay.ProfileDir("solo")], _relay.ProfileDir("unused-root"));
+        Assert.False(o.CanSwitchAccounts);
+        Assert.Empty(o.LocalAccounts());
+    }
+
+    [AvaloniaFact]
+    public async Task ForgottenPasswordErasesAndStartsOver()
+    {
+        var options = Options("alice");
+        var vm = new MainWindowViewModel(options, startPolling: false);
+        var signUp = Assert.IsType<OnboardingViewModel>(vm.Current);
+        (signUp.Username, signUp.Password, signUp.ConfirmPassword) = ("alice", "correct horse", "correct horse");
+        await signUp.RegisterCommand.ExecuteAsync(null);
+        await vm.ShellReady;
+        vm.Dispose();
+
+        vm = new MainWindowViewModel(options, startPolling: false);
+        var window = Show(vm);
+        var unlock = Assert.IsType<UnlockViewModel>(vm.Current);
+        unlock.ForgotPasswordCommand.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(unlock.ConfirmingErase);
+        Screenshot(window, "16-forgot-password");
+        unlock.CancelEraseCommand.Execute(null);
+        Assert.False(unlock.ConfirmingErase);
+        Assert.True(Directory.Exists(_relay.ProfileDir("alice")));
+
+        unlock.ForgotPasswordCommand.Execute(null);
+        unlock.EraseCommand.Execute(null);
+        Assert.IsType<OnboardingViewModel>(vm.Current);
+        Assert.False(Directory.Exists(_relay.ProfileDir("alice")));
+
+        // The relay still holds the old name (the keys to close it are gone), so pick another.
+        var again = Assert.IsType<OnboardingViewModel>(vm.Current);
+        (again.Username, again.Password, again.ConfirmPassword) = ("alice", "new password", "new password");
+        await again.RegisterCommand.ExecuteAsync(null);
+        Assert.Contains("already registered", again.Error);
+        again.Username = "alice2";
+        await again.RegisterCommand.ExecuteAsync(null);
+        Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
         vm.Dispose();
     }
 
@@ -107,6 +302,7 @@ public sealed class AppTests : IDisposable
         Show(vm);
         var onboarding = Assert.IsType<OnboardingViewModel>(vm.Current);
 
+        (onboarding.Password, onboarding.ConfirmPassword) = ("correct horse", "correct horse");
         onboarding.Username = "bad name!";
         await onboarding.RegisterCommand.ExecuteAsync(null);
         Assert.Contains("lowercase", onboarding.Error);
@@ -120,23 +316,37 @@ public sealed class AppTests : IDisposable
     [AvaloniaFact]
     public async Task ChatEndToEnd()
     {
-        var bob = await _relay.Register("bob");
-        var carol = await _relay.Register("carol");
-        _relay.Close(await _relay.Register("alice")); // alice signed up earlier; now she opens the app
+        var bob = await _relay.Register("bob", friends: false);
+        var carol = await _relay.Register("carol", friends: false);
+        _relay.Close(await _relay.Register("alice", friends: false)); // alice signed up earlier; now she opens the app
 
         var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
         var window = Show(vm);
         var shell = Assert.IsType<ShellViewModel>(vm.Current);
         await vm.ShellReady;
+        Assert.Empty(shell.Contacts);
 
-        // Add bob and send with the Enter key, as a user would.
+        // Adding bob sends him a request; nothing can be sent until he accepts.
         Type(window, Find<TextBox>(window, "NewContactBox"), "bob", enter: true);
         await Settle();
         Assert.Equal("bob", shell.Selected?.Username);
+        Assert.True(shell.ShowOutgoingRequest);
+        Assert.False(shell.CanCompose);
+        Assert.Equal("Request sent", shell.Selected!.Preview);
+        Screenshot(window, "3a-request-sent");
 
+        await bob.SyncAsync();
+        Assert.Equal(ContactState.RequestReceived, bob.GetContact("alice")!.State);
+        await bob.AcceptRequestAsync("alice");
+        await shell.SyncNowAsync();
+        Assert.False(shell.ShowOutgoingRequest);
+        Assert.True(shell.CanCompose);
+        Assert.Equal(["bob accepted your request."], shell.Messages.Select(m => m.Text));
+
+        // Send with the Enter key, as a user would.
         Type(window, Find<TextBox>(window, "DraftBox"), "Hi Bob! This is end-to-end encrypted.", enter: true);
         await Settle();
-        var sent = Assert.Single(shell.Messages);
+        var sent = shell.Messages.Last();
         Assert.True(sent.Outgoing);
         Assert.Equal(MessageStatus.Sent, sent.Status);
         Assert.Equal("", shell.Draft);
@@ -146,25 +356,38 @@ public sealed class AppTests : IDisposable
         await bob.SendAsync("alice", "Got it. The relay only saw ciphertext.");
         await bob.SendAsync("alice", "Want to verify safety numbers later?");
         await shell.SyncNowAsync();
-        Assert.Equal(3, shell.Messages.Count);
-        Assert.False(shell.Messages[1].Outgoing);
+        Assert.Equal(4, shell.Messages.Count);
+        Assert.False(shell.Messages[2].Outgoing);
         Assert.Equal("Want to verify safety numbers later?", shell.Contacts.Single(c => c.Username == "bob").Preview);
         Assert.Equal(0, shell.Contacts.Single(c => c.Username == "bob").Unread); // the chat is open
 
-        // A message from someone new adds them to the top of the list with an unread badge.
-        await carol.SendAsync("alice", "hey alice, it's carol");
+        // A request from someone new puts them at the top of the list, marked as a request.
+        await carol.AddContactAsync("alice");
+        await Assert.ThrowsAsync<NotFriendsException>(() => carol.SendAsync("alice", "let me in"));
         await shell.SyncNowAsync();
-        Assert.Equal("carol", shell.Contacts[0].Username);
-        Assert.Equal(1, shell.Contacts[0].Unread);
-        Assert.Equal("hey alice, it's carol", shell.Contacts[0].Preview);
-        Assert.Equal(3, shell.Messages.Count); // still showing bob's chat
+        var carolRow = shell.Contacts[0];
+        Assert.Equal("carol", carolRow.Username);
+        Assert.True(carolRow.IsIncomingRequest);
+        Assert.Equal(1, carolRow.Unread);
+        Assert.Equal(4, shell.Messages.Count); // still showing bob's chat
         Screenshot(window, "3-chat");
 
-        // Opening carol's chat clears the badge and shows her message.
-        shell.Selected = shell.Contacts[0];
+        // Opening it shows Accept / Decline; accepting lets them talk.
+        shell.Selected = carolRow;
         await Settle();
-        Assert.Equal(0, shell.Contacts[0].Unread);
-        Assert.Equal(["hey alice, it's carol"], shell.Messages.Select(m => m.Text));
+        Assert.Equal(0, carolRow.Unread);
+        Assert.True(shell.ShowIncomingRequest);
+        Assert.False(shell.CanCompose);
+        Screenshot(window, "3b-incoming-request");
+        Find<Button>(window, "AcceptRequestButton").Command!.Execute(null);
+        await Settle();
+        Assert.True(shell.CanCompose);
+        Assert.False(shell.ShowIncomingRequest);
+        await carol.SyncAsync();
+        Assert.True(carol.GetContact("alice")!.IsFriend);
+        await carol.SendAsync("alice", "hey alice, it's carol");
+        await shell.SyncNowAsync();
+        Assert.Equal("hey alice, it's carol", shell.Messages.Last().Text);
 
         // History survives closing and reopening the app.
         vm.Dispose();
@@ -174,6 +397,136 @@ public sealed class AppTests : IDisposable
         Assert.Equal(["carol", "bob"], shell2.Contacts.Select(c => c.Username));
         Assert.Equal("Want to verify safety numbers later?", shell2.Contacts[1].Preview);
         reopened.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task DecliningARequestBlocksTheSender()
+    {
+        var mallory = await _relay.Register("mallory", friends: false);
+        _relay.Close(await _relay.Register("alice", friends: false));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+
+        await mallory.AddContactAsync("alice");
+        await shell.SyncNowAsync();
+        shell.Selected = Assert.Single(shell.Contacts);
+        await Settle();
+        Find<Button>(window, "DeclineRequestButton").Command!.Execute(null);
+        await Settle();
+        Assert.Empty(shell.Contacts);
+        Assert.Null(shell.Selected);
+
+        // Another request, or a sneaky direct message, never shows up.
+        await mallory.AddContactAsync("alice");
+        await shell.SyncNowAsync();
+        Assert.Empty(shell.Contacts);
+        vm.Dispose();
+    }
+
+    private long RelayCount(string sql)
+    {
+        using var c = new SqliteConnection($"Data Source={_relay.RelayDbPath};Pooling=False");
+        c.Open();
+        using var cmd = c.CreateCommand();
+        cmd.CommandText = sql;
+        return (long)cmd.ExecuteScalar()!;
+    }
+
+    [AvaloniaFact]
+    public async Task LogOutErasesTheAccountAndFreesTheUsername()
+    {
+        var bob = await _relay.Register("bob");
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        var window = Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        Type(window, Find<TextBox>(window, "NewContactBox"), "bob", enter: true);
+        await Settle();
+        Type(window, Find<TextBox>(window, "DraftBox"), "bye for now", enter: true);
+        await Settle();
+        await bob.SendAsync("alice", "still queued on the relay when alice logs out");
+        var aliceKey = (await bob.CheckIdentityAsync("alice")).SafetyNumber;
+
+        // Cancel keeps everything.
+        Find<Button>(window, "LogOutButton").Command!.Execute(null);
+        Dispatcher.UIThread.RunJobs();
+        Assert.True(shell.IsLogOutOpen);
+        Screenshot(window, "14-log-out");
+        shell.CancelLogOutCommand.Execute(null);
+        Assert.False(shell.IsLogOutOpen);
+        Assert.IsType<ShellViewModel>(vm.Current);
+
+        // Confirming closes the account on the relay and erases this computer's copy.
+        shell.OpenLogOutCommand.Execute(null);
+        await shell.LogOutCommand.ExecuteAsync(null);
+        var onboarding = Assert.IsType<OnboardingViewModel>(vm.Current);
+        Assert.Equal("E2EE Messenger", vm.Title);
+        Assert.False(Directory.Exists(_relay.ProfileDir("alice")));
+        Assert.Equal(0, RelayCount("SELECT count(*) FROM accounts WHERE username = 'alice'"));
+        Assert.Equal(0, RelayCount("SELECT count(*) FROM inbox WHERE recipient = 'alice'"));
+        Assert.Equal(0, RelayCount("SELECT count(*) FROM one_time_prekeys WHERE username = 'alice'"));
+        Assert.Equal(1, RelayCount("SELECT count(*) FROM accounts WHERE username = 'bob'"));
+
+        // The username is free again; whoever takes it has new keys, and bob can tell.
+        Show(vm);
+        (onboarding.Username, onboarding.Password, onboarding.ConfirmPassword) = ("alice", "correct horse", "correct horse");
+        await onboarding.RegisterCommand.ExecuteAsync(null);
+        var fresh = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+        Assert.Empty(fresh.Contacts);
+        var check = await bob.CheckIdentityAsync("alice");
+        Assert.False(check.MatchesTrustedKey);
+        Assert.NotEqual(aliceKey, check.SafetyNumber);
+        vm.Dispose();
+    }
+
+    [AvaloniaFact]
+    public async Task LogOutOffersToContinueWhenTheRelayCannotCloseTheAccount()
+    {
+        _relay.Close(await _relay.Register("alice"));
+        var vm = new MainWindowViewModel(Options("alice"), startPolling: false);
+        Show(vm);
+        var shell = Assert.IsType<ShellViewModel>(vm.Current);
+        await vm.ShellReady;
+
+        // The relay already forgot alice (as an old relay that lacks the endpoint, or a wiped one, would fail).
+        using (var c = new SqliteConnection($"Data Source={_relay.RelayDbPath};Pooling=False"))
+        {
+            c.Open();
+            using var cmd = c.CreateCommand();
+            cmd.CommandText = "DELETE FROM accounts WHERE username = 'alice'";
+            cmd.ExecuteNonQuery();
+        }
+        shell.OpenLogOutCommand.Execute(null);
+        await shell.LogOutCommand.ExecuteAsync(null);
+        Assert.True(shell.HasLogOutError);
+        Assert.Contains("username stays taken", shell.LogOutError);
+        Assert.IsType<ShellViewModel>(vm.Current);
+        Assert.True(Directory.Exists(_relay.ProfileDir("alice")));
+
+        shell.LogOutAnywayCommand.Execute(null);
+        Assert.IsType<OnboardingViewModel>(vm.Current);
+        Assert.False(Directory.Exists(_relay.ProfileDir("alice")));
+        vm.Dispose();
+    }
+
+    [Fact]
+    public void SignUpDefaultsToTheBuiltInRelay()
+    {
+        Assert.Equal("https://signal-clone.duckdns.org:8443", AppOptions.BuiltInRelay);
+        var previous = Environment.GetEnvironmentVariable("E2EE_SERVER");
+        try
+        {
+            Environment.SetEnvironmentVariable("E2EE_SERVER", null);
+            Assert.Equal(AppOptions.BuiltInRelay, AppOptions.Parse([]).DefaultServer);
+            Environment.SetEnvironmentVariable("E2EE_SERVER", "http://127.0.0.1:8000");
+            Assert.Equal("http://127.0.0.1:8000", AppOptions.Parse([]).DefaultServer);
+            Assert.Equal("http://10.0.0.5:8000", AppOptions.Parse(["--server", "http://10.0.0.5:8000"]).DefaultServer);
+        }
+        finally { Environment.SetEnvironmentVariable("E2EE_SERVER", previous); }
     }
 
     [AvaloniaFact]
@@ -251,6 +604,7 @@ public sealed class AppTests : IDisposable
         }
         var newBob = _relay.Open("bob-reinstalled");
         await newBob.RegisterAsync("bob");
+        await newBob.MakeFriendForTestAsync("alice"); // the reinstalled bob still thinks of alice as a friend
         return newBob;
     }
 
@@ -343,7 +697,8 @@ public sealed class AppTests : IDisposable
         Type(window, Find<TextBox>(window, "GroupNameBox"), "COSC 483 project");
         Type(window, Find<TextBox>(window, "GroupMembersBox"), "bob, carol, nobody");
         await form.SubmitCommand.ExecuteAsync(null);
-        Assert.Contains("No user named 'nobody'", form.Error); // the form stays open with the error
+        Assert.Contains("only add friends", form.Error); // the form stays open with the error
+        Assert.Contains("nobody", form.Error);
         Screenshot(window, "9-new-group");
 
         form.Members = "bob, carol";
@@ -601,7 +956,7 @@ public sealed class AppTests : IDisposable
         await vm.ShellReady;
 
         await bob.SendAsync("alice", "pushed");
-        for (var i = 0; i < 100 && shell.Contacts.Count == 0; i++)
+        for (var i = 0; i < 100 && shell.Contacts.FirstOrDefault()?.Preview != "pushed"; i++)
         {
             await Task.Delay(50);
             Dispatcher.UIThread.RunJobs();

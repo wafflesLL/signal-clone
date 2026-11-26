@@ -85,7 +85,7 @@ public sealed class GroupTests : IDisposable
         Assert.Equal(["carol: thanks for the invite"], await Receive(alice));
 
         await Assert.ThrowsAsync<MessengerException>(() => alice.AddGroupMembersAsync(group.Id, ["bob"]));
-        await Assert.ThrowsAsync<UserNotFoundException>(() => alice.AddGroupMembersAsync(group.Id, ["nobody"]));
+        await Assert.ThrowsAsync<NotFriendsException>(() => alice.AddGroupMembersAsync(group.Id, ["nobody"]));
     }
 
     [Fact]
@@ -183,6 +183,7 @@ public sealed class GroupTests : IDisposable
         }
         var newBob = _relay.Open("bob-reinstalled");
         await newBob.RegisterAsync("bob");
+        await newBob.MakeFriendForTestAsync("alice"); // the reinstalled bob still thinks of alice as a friend
         await newBob.SendAsync("alice", "new phone");
 
         var result = await alice.SyncAsync();
@@ -214,7 +215,7 @@ public sealed class GroupTests : IDisposable
         await _relay.Register("bob");
         await Assert.ThrowsAsync<MessengerException>(() => alice.CreateGroupAsync("  ", ["bob"]));
         await Assert.ThrowsAsync<MessengerException>(() => alice.CreateGroupAsync("Solo", ["alice"]));
-        await Assert.ThrowsAsync<UserNotFoundException>(() => alice.CreateGroupAsync("Ghosts", ["bob", "ghost"]));
+        await Assert.ThrowsAsync<NotFriendsException>(() => alice.CreateGroupAsync("Ghosts", ["bob", "ghost"]));
         Assert.Empty(alice.Groups()); // nothing half-created
     }
 }

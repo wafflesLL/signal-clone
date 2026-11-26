@@ -29,8 +29,31 @@ public sealed record Group(string Id, string Name, IReadOnlyList<string> Members
 /// <param name="Verified">The user compared safety numbers with this contact and confirmed them.</param>
 /// <param name="IdentityChanged">Someone presented a different identity key for this contact. Their
 /// messages are held and sending is blocked until the user checks and trusts a key.</param>
+/// <summary>
+/// Where a contact stands. Only friends can message each other; a request has to be
+/// accepted first. Kept on each device; the relay never learns who is friends with whom.
+/// </summary>
+public enum ContactState
+{
+    /// <summary>Known only because we share a group (or they tried to reach us). Not shown as a chat.</summary>
+    Stranger,
+    /// <summary>You asked; waiting for them to accept.</summary>
+    RequestSent,
+    /// <summary>They asked; waiting for you to accept or decline.</summary>
+    RequestReceived,
+    Friend,
+    /// <summary>You declined them: nothing from them is shown, including new requests.</summary>
+    Blocked,
+}
+
 public sealed record Contact(string Username, byte[] IdentitySigPub, byte[] IdentityDhPub, DateTimeOffset AddedAt,
-    bool Verified = false, bool IdentityChanged = false);
+    bool Verified = false, bool IdentityChanged = false, ContactState State = ContactState.Friend)
+{
+    public bool IsFriend => State == ContactState.Friend;
+
+    /// <summary>Shown in the chat list: friends and open requests either way.</summary>
+    public bool IsListed => State is ContactState.Friend or ContactState.RequestSent or ContactState.RequestReceived;
+}
 
 /// <summary>One Double Ratchet session with a peer. PendingInitial is resent with every
 /// outgoing message until the peer's first reply arrives on this session.</summary>
@@ -98,6 +121,8 @@ internal sealed class LocalStore : IDisposable
             while (r.Read()) columns.Add(r.GetString(0));
         if (!columns.Contains("verified")) Exec("ALTER TABLE contacts ADD COLUMN verified INTEGER NOT NULL DEFAULT 0");
         if (!columns.Contains("identity_changed")) Exec("ALTER TABLE contacts ADD COLUMN identity_changed INTEGER NOT NULL DEFAULT 0");
+        // Contacts from before requests existed were all chats you'd started or answered.
+        if (!columns.Contains("state")) Exec("ALTER TABLE contacts ADD COLUMN state TEXT NOT NULL DEFAULT 'Friend'");
 
         columns.Clear();
         using (var cmd = Cmd("SELECT name FROM pragma_table_info('messages')"))
@@ -207,10 +232,11 @@ internal sealed class LocalStore : IDisposable
         Exec("DELETE FROM prekeys WHERE kind = $k AND id = $i", ("$k", kind), ("$i", (long)id));
 
     // ------------------------------------------------------------ contacts
-    private const string ContactColumns = "username, sig_pub, dh_pub, added_at, verified, identity_changed";
+    private const string ContactColumns = "username, sig_pub, dh_pub, added_at, verified, identity_changed, state";
 
     private static Contact ReadContact(SqliteDataReader r) =>
-        new(r.GetString(0), (byte[])r[1], (byte[])r[2], FromMs(r.GetInt64(3)), r.GetInt64(4) == 1, r.GetInt64(5) == 1);
+        new(r.GetString(0), (byte[])r[1], (byte[])r[2], FromMs(r.GetInt64(3)), r.GetInt64(4) == 1, r.GetInt64(5) == 1,
+            Enum.TryParse<ContactState>(r.GetString(6), out var state) ? state : ContactState.Stranger);
 
     public Contact? GetContact(string username)
     {
@@ -220,9 +246,9 @@ internal sealed class LocalStore : IDisposable
     }
 
     public void PutContact(Contact c) =>
-        Exec($"INSERT OR REPLACE INTO contacts ({ContactColumns}) VALUES ($u, $s, $d, $t, $v, $c)",
+        Exec($"INSERT OR REPLACE INTO contacts ({ContactColumns}) VALUES ($u, $s, $d, $t, $v, $c, $st)",
             ("$u", c.Username), ("$s", c.IdentitySigPub), ("$d", c.IdentityDhPub), ("$t", Ms(c.AddedAt)),
-            ("$v", c.Verified ? 1 : 0), ("$c", c.IdentityChanged ? 1 : 0));
+            ("$v", c.Verified ? 1 : 0), ("$c", c.IdentityChanged ? 1 : 0), ("$st", c.State.ToString()));
 
     public List<Contact> Contacts()
     {

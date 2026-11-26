@@ -40,6 +40,15 @@
       <Setter Property="FontSize" Value="11" />
       <Setter Property="FontWeight" Value="SemiBold" />
     </Style>
+    <Style Selector="Border.badge.request">
+      <Setter Property="Background" Value="#DCE8FB" />
+      <Setter Property="Padding" Value="6,0" />
+    </Style>
+    <Style Selector="Border.badge.request TextBlock">
+      <Setter Property="Foreground" Value="#0B3D91" />
+      <Setter Property="FontSize" Value="10" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+    </Style>
     <Style Selector="Button.image">
       <Setter Property="Padding" Value="0" />
       <Setter Property="Background" Value="Transparent" />
@@ -56,18 +65,6 @@
       <Setter Property="CornerRadius" Value="10" />
       <Setter Property="Background" Value="#26000000" />
       <Setter Property="VerticalAlignment" Value="Center" />
-    </Style>
-    <Style Selector="Button.link">
-      <Setter Property="Padding" Value="0,2" />
-      <Setter Property="MinHeight" Value="0" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="FontWeight" Value="SemiBold" />
-      <Setter Property="FontSize" Value="13" />
-      <Setter Property="Foreground" Value="{DynamicResource LinkBrush}" />
-      <Setter Property="Cursor" Value="Hand" />
-    </Style>
-    <Style Selector="Button.link:pointerover /template/ ContentPresenter">
-      <Setter Property="Background" Value="Transparent" />
     </Style>
     <Style Selector="Border.bubble.outgoing Button.link">
       <Setter Property="Foreground" Value="White" />
@@ -97,7 +94,11 @@
       <DockPanel>
         <StackPanel DockPanel.Dock="Top" Margin="16,16,16,8" Spacing="10">
           <StackPanel Spacing="2">
-            <TextBlock Text="{Binding Me}" FontSize="18" FontWeight="SemiBold" />
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{Binding Me}" FontSize="18" FontWeight="SemiBold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+              <Button Name="LogOutButton" Grid.Column="1" Content="Log out" Command="{Binding OpenLogOutCommand}"
+                      Padding="10,3" FontSize="12" ToolTip.Tip="Log out and erase this account from this computer" />
+            </Grid>
             <StackPanel Orientation="Horizontal" Spacing="6">
               <Ellipse Width="8" Height="8" Fill="#2E9E6B" IsVisible="{Binding RelayOnline}" VerticalAlignment="Center" />
               <Ellipse Width="8" Height="8" Fill="#D13438" IsVisible="{Binding !RelayOnline}" VerticalAlignment="Center" />
@@ -106,7 +107,7 @@
             </StackPanel>
           </StackPanel>
           <Grid ColumnDefinitions="*,6,Auto">
-            <TextBox Name="NewContactBox" Text="{Binding NewContact}" Watermark="Add someone by username">
+            <TextBox Name="NewContactBox" Text="{Binding NewContact}" Watermark="Send a request by username">
               <TextBox.KeyBindings>
                 <KeyBinding Gesture="Enter" Command="{Binding AddContactCommand}" />
               </TextBox.KeyBindings>
@@ -133,6 +134,9 @@
                   <TextBlock Text="{Binding Title}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" />
                   <TextBlock Text="✓" Foreground="#2E9E6B" FontWeight="Bold" IsVisible="{Binding Verified}" ToolTip.Tip="Safety number verified" />
                   <TextBlock Text="⚠" Foreground="#D13438" IsVisible="{Binding IdentityChanged}" ToolTip.Tip="Safety number changed" />
+                  <Border Classes="badge request" IsVisible="{Binding IsIncomingRequest}" VerticalAlignment="Center">
+                    <TextBlock Text="Request" />
+                  </Border>
                 </StackPanel>
                 <TextBlock Grid.Column="2" Classes="muted" FontSize="11" Text="{Binding TimeText}" VerticalAlignment="Bottom" HorizontalAlignment="Right" />
                 <TextBlock Grid.Row="1" Grid.Column="1" Margin="10,1,6,0" Classes="muted" FontSize="13"
@@ -198,6 +202,23 @@
               <Button Name="ReviewKeyButton" Grid.Column="1" Content="Review" Command="{Binding ShowSafetyNumberCommand}"
                       Background="#D13438" Foreground="White" Margin="12,0,0,0" VerticalAlignment="Center" />
             </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,12"
+                  IsVisible="{Binding ShowIncomingRequest}">
+            <Grid ColumnDefinitions="*,Auto">
+              <TextBlock Text="{Binding IncomingRequestText}" TextWrapping="Wrap" VerticalAlignment="Center" FontSize="13" />
+              <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8" Margin="12,0,0,0" VerticalAlignment="Center">
+                <Button Name="DeclineRequestButton" Content="Decline" Command="{Binding DeclineRequestCommand}"
+                        ToolTip.Tip="Hide this chat and block them. They aren't told." />
+                <Button Name="AcceptRequestButton" Content="Accept" Command="{Binding AcceptRequestCommand}" Classes="accent" />
+              </StackPanel>
+            </Grid>
+          </Border>
+
+          <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,10"
+                  IsVisible="{Binding ShowOutgoingRequest}">
+            <TextBlock Text="{Binding OutgoingRequestText}" TextWrapping="Wrap" FontSize="13" />
           </Border>
 
           <Border DockPanel.Dock="Top" Background="{DynamicResource SystemControlBackgroundBaseLowBrush}" Padding="20,10"
@@ -356,6 +377,28 @@
           <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
             <Button Content="Cancel" Command="{Binding CloseCommand}" />
             <Button Name="GroupSubmitButton" Content="{Binding SubmitText}" Command="{Binding SubmitCommand}" Classes="accent" />
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+
+    <!-- Log out, over everything -->
+    <Border Grid.ColumnSpan="2" Background="#99000000" IsVisible="{Binding IsLogOutOpen}">
+      <Border Width="440" Padding="28" CornerRadius="12" HorizontalAlignment="Center" VerticalAlignment="Center"
+              Background="{DynamicResource SystemControlBackgroundAltHighBrush}">
+        <StackPanel Spacing="12">
+          <TextBlock Classes="title" FontSize="20" Text="Log out?" />
+          <TextBlock TextWrapping="Wrap"
+                     Text="Your keys exist only on this computer, so logging out erases this account here: your chats, files, contacts, and keys. This can't be undone." />
+          <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                     Text="Your username is released on the relay, so you (or someone else) can sign up with it again. Contacts will see a new safety number if that happens." />
+          <TextBlock Name="LogOutError" Text="{Binding LogOutError}" Foreground="#D13438" TextWrapping="Wrap" IsVisible="{Binding HasLogOutError}" />
+          <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsLoggingOut}" />
+          <StackPanel Orientation="Horizontal" Spacing="8" HorizontalAlignment="Right">
+            <Button Content="Cancel" Command="{Binding CancelLogOutCommand}" />
+            <Button Name="LogOutAnywayButton" Content="Log out anyway" Command="{Binding LogOutAnywayCommand}" IsVisible="{Binding HasLogOutError}" />
+            <Button Name="ConfirmLogOutButton" Content="Log out and erase" Command="{Binding LogOutCommand}"
+                    Background="#C42B1C" Foreground="White" IsVisible="{Binding !HasLogOutError}" />
           </StackPanel>
         </StackPanel>
       </Border>

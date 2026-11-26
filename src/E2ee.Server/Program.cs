@@ -101,7 +101,16 @@ app.MapPost("/v1/accounts", async (HttpContext ctx, RelayStore store, ReplayGuar
     };
 });
 
-app.MapPut("/v1/keys", async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+// Log out: the account's own signature is required, so only its owner can close it.
+app.MapDelete("/v1/accounts", async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>
+{
+    var (user, _, error) = await Authenticate(ctx, store, replay);
+    if (error is not null) return error;
+    store.DeleteAccount(user!);
+    return Json(new { ok = true });
+});
+
+app.MapPut("/v1/keys",async (HttpContext ctx, RelayStore store, ReplayGuard replay) =>
 {
     var (user, body, error) = await Authenticate(ctx, store, replay);
     if (error is not null) return error;

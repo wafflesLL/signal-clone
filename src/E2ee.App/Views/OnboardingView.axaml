@@ -16,8 +16,16 @@
       </StackPanel>
 
       <StackPanel Spacing="4">
+        <TextBlock Text="Password" />
+        <TextBox Name="PasswordBox" Text="{Binding Password}" PasswordChar="•" Watermark="At least 8 characters" />
+        <TextBox Name="ConfirmPasswordBox" Text="{Binding ConfirmPassword}" PasswordChar="•" Watermark="Type it again" />
+        <TextBlock Classes="muted" FontSize="12" TextWrapping="Wrap"
+                   Text="Locks the app on this computer. It never leaves this device and can't be recovered, so keep it somewhere safe." />
+      </StackPanel>
+
+      <StackPanel Spacing="4">
         <TextBlock Text="Relay address" />
-        <TextBox Text="{Binding ServerUrl}" Watermark="http://127.0.0.1:8000" />
+        <TextBox Name="ServerBox" Text="{Binding ServerUrl}" Watermark="https://relay.example.org" />
       </StackPanel>
 
       <TextBlock Classes="error" Text="{Binding Error}" IsVisible="{Binding Error, Converter={x:Static ObjectConverters.IsNotNull}}" />
@@ -25,6 +33,8 @@
       <Button Content="Create account" Command="{Binding RegisterCommand}" IsDefault="True"
               HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" Classes="accent" />
       <ProgressBar IsIndeterminate="True" IsVisible="{Binding IsBusy}" />
+      <Button Name="OtherAccountButton" Content="Use an account already on this computer" Command="{Binding UseOtherAccountCommand}"
+              Classes="link" HorizontalAlignment="Center" IsVisible="{Binding CanUseOtherAccount}" />
     </StackPanel>
   </Border>
 </UserControl>

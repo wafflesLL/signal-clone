@@ -194,6 +194,15 @@ until the user runs `trust`.
   padding. Files are read into memory whole, which is why the limit is 100 MB.
 - One device per account. Signal's multi-device support (Sesame) is out of scope.
 - Contact discovery is by exact username, not by phone number.
+- Contact requests work like a friend request: nothing can be sent until the other person
+  accepts. Signal instead lets anyone send a first message, shown as a message request
+  with the content visible. Like Signal's, ours are enforced on each device, not by the
+  relay, so the relay never learns the social graph; a modified client can still deliver
+  ciphertext, but the recipient's app drops it unread. Declining blocks silently.
+- The desktop app's local master key is locked with a password (Argon2id, then
+  XChaCha20-Poly1305) instead of relying only on the OS keychain. There is no recovery.
+- Logging out deletes the account on the relay and erases the device's copy; with keys
+  that exist on one device only, there is nothing to log back in to.
 
 ## Milestones
 

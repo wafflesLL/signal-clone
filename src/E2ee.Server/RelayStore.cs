@@ -237,6 +237,40 @@ public sealed class RelayStore
 
     public bool AttachmentExists(string id) => File.Exists(BlobPath(id));
 
+    /// <summary>
+    /// Forgets the account: its identity binding (which frees the username), prekeys,
+    /// queued messages, and its claim on pending attachments. Attachments nobody else
+    /// still needs are deleted.
+    /// </summary>
+    public bool DeleteAccount(string user)
+    {
+        using var c = Open();
+        using var tx = c.BeginTransaction();
+        int removed;
+        using (var cmd = Cmd(c, tx, "DELETE FROM accounts WHERE username = $u", ("$u", user))) removed = cmd.ExecuteNonQuery();
+        foreach (var sql in new[]
+        {
+            "DELETE FROM signed_prekeys WHERE username = $u",
+            "DELETE FROM one_time_prekeys WHERE username = $u",
+            "DELETE FROM inbox WHERE recipient = $u",
+            "DELETE FROM attachment_recipients WHERE username = $u",
+        })
+        {
+            using var cmd = Cmd(c, tx, sql, ("$u", user));
+            cmd.ExecuteNonQuery();
+        }
+        var orphaned = new List<string>();
+        using (var cmd = Cmd(c, tx, """
+            SELECT id FROM attachments a WHERE NOT EXISTS
+              (SELECT 1 FROM attachment_recipients r WHERE r.attachment_id = a.id AND r.fetched = 0)
+            """))
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) orphaned.Add(r.GetString(0));
+        foreach (var id in orphaned) DeleteAttachment(c, tx, id);
+        tx.Commit();
+        return removed > 0;
+    }
+
     private void PurgeExpiredAttachments()
     {
         using var c = Open();

@@ -4,6 +4,7 @@
         x:Class="E2ee.App.Views.MainWindow"
         x:DataType="vm:MainWindowViewModel"
         Title="{Binding Title}"
+        Icon="avares://E2eeMessenger/Assets/icon.ico"
         Width="980" Height="640" MinWidth="640" MinHeight="420"
         WindowStartupLocation="CenterScreen">
   <ContentControl Content="{Binding Current}" />

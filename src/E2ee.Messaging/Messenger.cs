@@ -58,6 +58,12 @@ public class MessengerException(string message) : Exception(message);
 public sealed class NoRelayConfiguredException() : MessengerException("No relay URL given and none saved in this profile. Register first.");
 public sealed class ProfileInUseException(string dir) : MessengerException($"Profile {dir} is already open in another process.");
 public sealed class UsernameTakenException(string user) : MessengerException($"The username '{user}' is already registered to someone else.");
+/// <summary>Messaging someone before you're friends.</summary>
+public sealed class NotFriendsException(string user, string message) : MessengerException(message)
+{
+    public string Username { get; } = user;
+}
+
 public sealed class UserNotFoundException(string user) : MessengerException($"No user named '{user}' is registered on this relay.");
 public sealed class IdentityChangedException(string user) : MessengerException(
     $"{user}'s safety number changed: their identity key is not the one you trusted before. Someone may be " +
@@ -67,8 +73,9 @@ public sealed class IdentityChangedException(string user) : MessengerException(
 }
 
 /// <summary>
-/// Plaintext inside every ratchet message. Type is "text", "group_update" (the group's name
-/// and full member list, sent when it is created or someone is added) or "group_leave".
+/// Plaintext inside every ratchet message. Type is "text", "reaction", "group_update" (the
+/// group's name and full member list, sent when it is created or someone is added),
+/// "group_leave", "contact_request", or "contact_accept".
 /// Group is set for anything that belongs to a group chat.
 /// </summary>
 internal sealed record MessageContent(string Type, string Body, long SentAt, GroupContext? Group = null,
@@ -154,6 +161,26 @@ public sealed class Messenger : IDisposable
         }
     }
 
+    /// <summary>
+    /// Log out, second half: erases a closed profile from this computer: its keys,
+    /// history, contacts, and media, plus the master key wherever it is kept.
+    /// Call <see cref="CloseAccountAsync"/> first, then dispose the Messenger.
+    /// </summary>
+    public static void DeleteProfile(MessengerOptions o)
+    {
+        if (!Directory.Exists(o.DataDirectory)) return;
+        // Taking the lock proves no Messenger (in this app or another) still has the profile open.
+        using (var probe = TryLock(o.DataDirectory) ?? throw new ProfileInUseException(o.DataDirectory)) { }
+        (o.KeyStore ?? MasterKeyStore.ForCurrentPlatform(o.DataDirectory)).Delete();
+        Directory.Delete(o.DataDirectory, recursive: true);
+    }
+
+    private static FileStream? TryLock(string dir)
+    {
+        try { return new FileStream(Path.Combine(dir, ".lock"), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None); }
+        catch (IOException) { return null; }
+    }
+
     private static Uri Normalize(Uri u) => u.AbsoluteUri.EndsWith('/') ? u : new Uri(u.AbsoluteUri + "/");
 
     private void LoadIdentity()
@@ -207,6 +234,20 @@ public sealed class Messenger : IDisposable
     private static DateTimeOffset Now => DateTimeOffset.UtcNow;
 
     // ================================================================ registration and prekeys
+
+    /// <summary>
+    /// Log out, first half: closes the account on the relay, which frees the username and
+    /// drops its prekeys and anything still queued for it. Then dispose this Messenger
+    /// and call <see cref="DeleteProfile"/>. Contacts who later message the username
+    /// see a safety-number change if someone else registers it.
+    /// </summary>
+    public Task CloseAccountAsync(CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        await _relay.DeleteAccountAsync(ct);
+        _store.SetMeta("registered", "0");
+        return true;
+    });
 
     /// <summary>Creates the identity (once), claims the username on the relay, and uploads prekeys.
     /// Safe to call again after a failure.</summary>
@@ -328,22 +369,103 @@ public sealed class Messenger : IDisposable
     /// <summary>Every direct chat and group with its latest message, most recent activity first.</summary>
     public Task<IReadOnlyList<Conversation>> ConversationsAsync() => Locked<IReadOnlyList<Conversation>>(() =>
         _store.Contacts()
+            .Where(c => c.IsListed)
             .Select(c => new Conversation(c, null, _store.History(c.Username, 1).FirstOrDefault()))
             .Concat(_store.Groups().Select(g => new Conversation(null, g, _store.GroupHistory(g.Id, 1).FirstOrDefault())))
             .OrderByDescending(c => c.LastActivity)
             .ToList());
 
-    /// <summary>Looks the user up on the relay and remembers their identity key (trust on first use).</summary>
+    /// <summary>
+    /// Sends a contact request: looks the user up on the relay, remembers their identity key
+    /// (trust on first use), and asks them to accept. Nothing else can be sent until they do.
+    /// If they had already asked you, this accepts instead.
+    /// </summary>
     public Task<Contact> AddContactAsync(string username, CancellationToken ct = default) => Locked(async () =>
     {
         RequireRegistered();
         if (username == Username) throw new MessengerException("That's you.");
-        var identity = await GetIdentityOrThrow(username, ct);
-        using var tx = _store.Begin();
-        var contact = Trust(username, identity.IdentitySigPub, identity.IdentityDhPub);
-        tx.Commit();
-        return contact;
+        var known = _store.GetContact(username);
+        switch (known?.State)
+        {
+            case ContactState.Friend:
+            case ContactState.RequestSent:
+                return known;
+            case ContactState.RequestReceived:
+                return await AcceptAsync(known, ct);
+        }
+        if (known is null)
+        {
+            var identity = await GetIdentityOrThrow(username, ct);
+            using var tx = _store.Begin();
+            Trust(username, identity.IdentitySigPub, identity.IdentityDhPub);
+            tx.Commit();
+        }
+        if (_store.GetContact(username) is { IdentityChanged: true }) throw new IdentityChangedException(username);
+        await SendControlAsync(username, "contact_request", () => SetState(username, ContactState.RequestSent), ct);
+        return _store.GetContact(username)!;
     });
+
+    /// <summary>Accepts someone's contact request. You can message each other from now on.</summary>
+    public Task<Contact> AcceptRequestAsync(string username, CancellationToken ct = default) => Locked(async () =>
+    {
+        RequireRegistered();
+        var c = _store.GetContact(username);
+        if (c is not { State: ContactState.RequestReceived }) throw new MessengerException($"{username} hasn't sent you a request.");
+        return await AcceptAsync(c, ct);
+    });
+
+    private async Task<Contact> AcceptAsync(Contact c, CancellationToken ct)
+    {
+        if (c.IdentityChanged) throw new IdentityChangedException(c.Username);
+        await SendControlAsync(c.Username, "contact_accept", () =>
+        {
+            SetState(c.Username, ContactState.Friend);
+            _store.InsertMessage(c.Username, true, $"You accepted {c.Username}'s request. Say hi!", Now, MessageStatus.Sent, isEvent: true);
+        }, ct);
+        return _store.GetContact(c.Username)!;
+    }
+
+    /// <summary>
+    /// Declines a request and blocks the sender: nothing from them is shown again, including
+    /// new requests, unless you add them yourself. They aren't told.
+    /// </summary>
+    public Task<Contact> DeclineRequestAsync(string username) => Locked(() =>
+    {
+        RequireRegistered();
+        var c = _store.GetContact(username) ?? throw new MessengerException($"{username} is not a contact.");
+        if (c.State == ContactState.Friend) throw new MessengerException($"{username} is already a friend.");
+        using var tx = _store.Begin();
+        SetState(username, ContactState.Blocked);
+        tx.Commit();
+        return _store.GetContact(username)!;
+    });
+
+    /// <summary>Tests only: records <paramref name="username"/> as a friend without the request round trip.</summary>
+    internal Task MakeFriendForTestAsync(string username) => Locked(async () =>
+    {
+        var identity = await GetIdentityOrThrow(username, default);
+        using var tx = _store.Begin();
+        Trust(username, identity.IdentitySigPub, identity.IdentityDhPub);
+        SetState(username, ContactState.Friend);
+        tx.Commit();
+        return true;
+    });
+
+    private void SetState(string username, ContactState state)
+    {
+        if (_store.GetContact(username) is { } c && c.State != state) _store.PutContact(c with { State = state });
+    }
+
+    /// <summary>Sends a request or acceptance. A hidden row carries its delivery, so it's retried like any message.</summary>
+    private Task SendControlAsync(string peer, string type, Action apply, CancellationToken ct) =>
+        FanOutAsync([peer], new MessageContent(type, "", 0), sentAt =>
+        {
+            apply();
+            return _store.InsertMessage(peer, true, "", sentAt, MessageStatus.Pending, kind: "control");
+        }, ct);
+
+    /// <summary>Acceptances to send once the sync is done: for requests that crossed, and for friends who asked again (say they reinstalled).</summary>
+    private readonly List<string> _acceptsToResend = new();
 
     /// <summary>
     /// Fetches the identity key the relay currently has for the user and the safety number
@@ -370,7 +492,8 @@ public sealed class Messenger : IDisposable
         RequireRegistered();
         var known = _store.GetContact(check.Username);
         var keyChanged = known is not null && !Same(known, check.IdentitySigPub, check.IdentityDhPub);
-        var contact = new Contact(check.Username, check.IdentitySigPub, check.IdentityDhPub, known?.AddedAt ?? Now, verified, false);
+        var contact = new Contact(check.Username, check.IdentitySigPub, check.IdentityDhPub, known?.AddedAt ?? Now, verified, false,
+            known?.State ?? ContactState.Stranger);
         using var tx = _store.Begin();
         _store.PutContact(contact);
         if (keyChanged) _store.DeleteSessions(check.Username);
@@ -429,7 +552,7 @@ public sealed class Messenger : IDisposable
             if (known.IdentityChanged || !Same(known, sigPub, dhPub)) throw new IdentityChangedException(username);
             return known;
         }
-        var contact = new Contact(username, sigPub, dhPub, Now);
+        var contact = new Contact(username, sigPub, dhPub, Now, State: ContactState.Stranger);
         _store.PutContact(contact);
         return contact;
     }
@@ -466,7 +589,20 @@ public sealed class Messenger : IDisposable
     {
         RequireRegistered();
         if (peer == Username) throw new MessengerException("You can't message yourself.");
-        if (_store.GetContact(peer) is { IdentityChanged: true }) throw new IdentityChangedException(peer);
+        var c = _store.GetContact(peer);
+        if (c is { IdentityChanged: true }) throw new IdentityChangedException(peer);
+        RequireFriend(peer, c);
+    }
+
+    private static void RequireFriend(string peer, Contact? c)
+    {
+        switch (c?.State)
+        {
+            case ContactState.Friend: return;
+            case ContactState.RequestSent: throw new NotFriendsException(peer, $"{peer} hasn't accepted your request yet.");
+            case ContactState.RequestReceived: throw new NotFriendsException(peer, $"Accept {peer}'s request first.");
+            default: throw new NotFriendsException(peer, $"You and {peer} aren't friends. Send a request first.");
+        }
     }
 
     private async Task<StoredMessage> SendDirectAsync(string peer, string text, PreparedMedia? media, CancellationToken ct)
@@ -606,6 +742,7 @@ public sealed class Messenger : IDisposable
         var others = NormalizeMembers(members);
         if (others.Count == 0) throw new MessengerException("Add at least one other person to the group.");
         CheckGroupSize(others.Count);
+        RequireFriends(others);
 
         var group = new Group(Convert.ToHexString(System.Security.Cryptography.RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
             name, others, Now);
@@ -626,6 +763,7 @@ public sealed class Messenger : IDisposable
         var added = NormalizeMembers(members).Except(group.Members).ToList();
         if (added.Count == 0) throw new MessengerException("They're already in the group.");
         CheckGroupSize(group.Members.Count + added.Count);
+        RequireFriends(added);
 
         var updated = group with { Members = group.Members.Concat(added).Order().ToList() };
         await FanOutAsync(updated.Members, GroupUpdate(updated), sentAt =>
@@ -704,6 +842,14 @@ public sealed class Messenger : IDisposable
         var list = members.Select(m => m.Trim().ToLowerInvariant()).Where(m => m.Length > 0 && m != Username).Distinct().Order().ToList();
         if (list.FirstOrDefault(m => !Usernames.IsValid(m)) is { } bad) throw new UserNotFoundException(bad);
         return list;
+    }
+
+    /// <summary>You can only put your own friends in a group (members can be strangers to each other).</summary>
+    private void RequireFriends(IEnumerable<string> people)
+    {
+        var notFriends = people.Where(p => _store.GetContact(p) is not { State: ContactState.Friend }).ToList();
+        if (notFriends.Count > 0)
+            throw new NotFriendsException(notFriends[0], $"You can only add friends to a group. Not friends yet: {string.Join(", ", notFriends)}.");
     }
 
     private static void CheckGroupSize(int others)
@@ -797,6 +943,8 @@ public sealed class Messenger : IDisposable
 
                 if (group is not { Active: true })
                 {
+                    // Only a friend can put you in a group; invites from anyone else are ignored.
+                    if (_store.GetContact(sender) is not { State: ContactState.Friend }) return (null, null);
                     // We were added (or added back after leaving).
                     _store.PutGroup(new Group(ctx.Id, name, others, group?.CreatedAt ?? Now));
                     return (_store.InsertMessage(sender, false, $"{sender} added you to “{name}”.", sentAt, MessageStatus.Received, ctx.Id, isEvent: true), null);
@@ -1050,6 +1198,14 @@ public sealed class Messenger : IDisposable
             else updated.Add(done);
         }
 
+        List<string> resend;
+        lock (_acceptsToResend) { resend = _acceptsToResend.Distinct().ToList(); _acceptsToResend.Clear(); }
+        foreach (var peer in resend)
+        {
+            try { await SendControlAsync(peer, "contact_accept", () => { }, ct); }
+            catch (Exception e) when (e is RelayException or MessengerException) { problems.Add($"Could not answer {peer}'s request: {e.Message}"); }
+        }
+
         await MaintainPrekeysAsync(consumedPrekey, ct);
         // Report each message once, as it is now: a message that arrived and was reacted to in
         // the same sync is just "received", with its reactions.
@@ -1083,9 +1239,13 @@ public sealed class Messenger : IDisposable
             var sentAt = DateTimeOffset.FromUnixTimeMilliseconds(content.SentAt);
             // The session advanced either way, so the transaction commits even if the content is refused.
             var isUpdate = false;
+            var friend = _store.GetContact(sender) is { State: ContactState.Friend };
             var (id, problem) = content switch
             {
                 { Group: not null } => ReceiveGroup(sender, content, sentAt, out isUpdate),
+                { Type: "contact_request" or "contact_accept" } => (ReceiveContactControl(sender, content.Type, sentAt), (string?)null),
+                // Direct messages only from friends. Anyone else's are dropped unseen.
+                _ when !friend => ((long?)null, (string?)null),
                 { Type: "text" } => ((long?)_store.InsertMessage(sender, false, content.Body, sentAt, MessageStatus.Received), (string?)null),
                 { Type: "reaction" } => (ApplyReaction(sender, null, content.Reaction), (string?)null),
                 _ => ((long?)null, (string?)null),
@@ -1111,6 +1271,34 @@ public sealed class Messenger : IDisposable
         {
             tx.Dispose();
             return Drop(item, $"Dropped a message from {sender}: it could not be decrypted ({e.Message})");
+        }
+    }
+
+    /// <summary>A contact request or acceptance from <paramref name="sender"/>. Runs inside the caller's transaction.</summary>
+    private long? ReceiveContactControl(string sender, string type, DateTimeOffset sentAt)
+    {
+        var c = _store.GetContact(sender);
+        if (c is null) return null; // Decrypt always records the sender first
+        switch (type, c.State)
+        {
+            case ("contact_request", ContactState.Stranger):
+                SetState(sender, ContactState.RequestReceived);
+                return _store.InsertMessage(sender, false, $"{sender} wants to chat with you.", sentAt, MessageStatus.Received, isEvent: true);
+            case ("contact_request", ContactState.RequestSent):
+                // You both asked: that's a yes from each side. Confirm it, in case they saw
+                // (and set aside) your request before sending theirs.
+                SetState(sender, ContactState.Friend);
+                lock (_acceptsToResend) _acceptsToResend.Add(sender);
+                return _store.InsertMessage(sender, false, $"You and {sender} are now friends.", sentAt, MessageStatus.Received, isEvent: true);
+            case ("contact_request", ContactState.Friend):
+                // They lost track of it (say they reinstalled); answer again once this sync is done.
+                lock (_acceptsToResend) _acceptsToResend.Add(sender);
+                return null;
+            case ("contact_accept", ContactState.RequestSent):
+                SetState(sender, ContactState.Friend);
+                return _store.InsertMessage(sender, false, $"{sender} accepted your request.", sentAt, MessageStatus.Received, isEvent: true);
+            default:
+                return null; // blocked, already decided, or an acceptance nobody asked for
         }
     }
 

@@ -23,19 +23,25 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
     public ObservableCollection<MessageViewModel> Messages { get; } = new();
 
     [ObservableProperty]
-    [NotifyPropertyChangedFor(nameof(HasSelection), nameof(CanCompose), nameof(ShowSafetyButton), nameof(CanManageGroup))]
+    [NotifyPropertyChangedFor(nameof(HasSelection), nameof(CanCompose), nameof(ShowSafetyButton), nameof(CanManageGroup),
+        nameof(ShowIncomingRequest), nameof(ShowOutgoingRequest), nameof(IncomingRequestText), nameof(OutgoingRequestText))]
     [NotifyCanExecuteChangedFor(nameof(SendCommand), nameof(ShowSafetyNumberCommand), nameof(OpenAddMembersCommand), nameof(LeaveGroupCommand))]
     private ContactViewModel? _selected;
 
     public bool HasSelection => Selected is not null;
 
-    /// <summary>False while a direct chat's key change is unresolved, or after leaving a group.</summary>
+    /// <summary>False until a direct chat's request is accepted, while its key change is unresolved, or after leaving a group.</summary>
     public bool CanCompose => Selected switch
     {
         { IsGroup: true } g => g.Active,
-        { } c => !c.IdentityChanged,
+        { } c => c.IsFriend && !c.IdentityChanged,
         null => false,
     };
+
+    public bool ShowIncomingRequest => Selected is { IsIncomingRequest: true };
+    public bool ShowOutgoingRequest => Selected is { IsOutgoingRequest: true };
+    public string IncomingRequestText => $"{Selected?.Title} wants to chat with you. You can't message each other until you accept.";
+    public string OutgoingRequestText => $"Request sent. You can message {Selected?.Title} once they accept.";
 
     public bool ShowSafetyButton => Selected is { IsGroup: false, IdentityChanged: false };
 
@@ -313,6 +319,12 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             Contacts.Insert(0, vm);
             Selected = vm;
             NewContact = "";
+            // Adding someone who had already asked accepts them, which writes a line in the chat.
+            if (contact.IsFriend && (await messenger.HistoryAsync(name, 1)).LastOrDefault() is { } last)
+            {
+                vm.Update(last);
+                if (Messages.All(m => m.Id != last.Id)) AddMessage(last);
+            }
         }
         catch (RelayException e) when (e.Status is null)
         {
@@ -323,6 +335,79 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
         {
             Notice = e.Message;
         }
+    }
+
+    // ---------------------------------------------------------------- contact requests
+
+    [RelayCommand]
+    private async Task AcceptRequestAsync()
+    {
+        if (Selected is not { IsIncomingRequest: true } c) return;
+        try
+        {
+            await messenger.AcceptRequestAsync(c.Username);
+            c.State = ContactState.Friend;
+            if ((await messenger.HistoryAsync(c.Username, 1)).LastOrDefault() is { } last)
+            {
+                c.Update(last);
+                if (Selected == c && Messages.All(m => m.Id != last.Id)) AddMessage(last);
+            }
+            SelectionStateChanged();
+        }
+        catch (RelayException e) when (e.Status is null)
+        {
+            RelayOnline = false;
+            Notice = "Can't reach the relay to accept. Try again when it's back.";
+        }
+        catch (Exception e) when (e is MessengerException or RelayException)
+        {
+            Notice = e.Message;
+        }
+    }
+
+    /// <summary>Declining blocks them; the chat disappears and they aren't told.</summary>
+    [RelayCommand]
+    private async Task DeclineRequestAsync()
+    {
+        if (Selected is not { IsIncomingRequest: true } c) return;
+        try
+        {
+            await messenger.DeclineRequestAsync(c.Username);
+            Contacts.Remove(c);
+            Selected = null;
+        }
+        catch (MessengerException e)
+        {
+            Notice = e.Message;
+        }
+    }
+
+    /// <summary>Picks up requests accepted or answered elsewhere (during a sync).</summary>
+    private void RefreshContactStates()
+    {
+        var states = messenger.Contacts().ToDictionary(c => c.Username, c => c.State);
+        foreach (var vm in Contacts.Where(c => c.IsDirect).ToList())
+        {
+            if (!states.TryGetValue(vm.Username, out var state)) continue;
+            if (state is ContactState.Blocked or ContactState.Stranger)
+            {
+                if (Selected == vm) Selected = null;
+                Contacts.Remove(vm);
+                continue;
+            }
+            if (vm.State == state) continue;
+            vm.State = state;
+            if (vm == Selected) SelectionStateChanged();
+        }
+    }
+
+    private void SelectionStateChanged()
+    {
+        OnPropertyChanged(nameof(CanCompose));
+        OnPropertyChanged(nameof(ShowSafetyButton));
+        OnPropertyChanged(nameof(ShowIncomingRequest));
+        OnPropertyChanged(nameof(ShowOutgoingRequest));
+        SendCommand.NotifyCanExecuteChanged();
     }
 
     // ---------------------------------------------------------------- safety numbers
@@ -402,6 +487,66 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
 
     [RelayCommand]
     private void DismissNotice() => Notice = null;
+
+    // ---------------------------------------------------------------- log out
+
+    /// <summary>Raised once the account is closed; the window erases the profile and shows sign-up.</summary>
+    public event Action? LoggedOut;
+
+    [ObservableProperty] private bool _isLogOutOpen;
+
+    [ObservableProperty]
+    [NotifyCanExecuteChangedFor(nameof(LogOutCommand), nameof(LogOutAnywayCommand))]
+    private bool _isLoggingOut;
+
+    /// <summary>Set when the relay couldn't close the account; offers logging out anyway.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(HasLogOutError))]
+    private string? _logOutError;
+
+    public bool HasLogOutError => LogOutError is not null;
+
+    [RelayCommand]
+    private void OpenLogOut()
+    {
+        LogOutError = null;
+        IsLogOutOpen = true;
+    }
+
+    [RelayCommand]
+    private void CancelLogOut()
+    {
+        if (!IsLoggingOut) IsLogOutOpen = false;
+    }
+
+    private bool CanLogOut() => !IsLoggingOut;
+
+    /// <summary>Closes the account on the relay (freeing the username), then erases this computer's copy.</summary>
+    [RelayCommand(CanExecute = nameof(CanLogOut))]
+    private async Task LogOutAsync()
+    {
+        IsLoggingOut = true;
+        LogOutError = null;
+        try
+        {
+            await messenger.CloseAccountAsync();
+            LoggedOut?.Invoke();
+        }
+        catch (Exception e) when (e is RelayException or MessengerException)
+        {
+            LogOutError = e is RelayException { Status: null }
+                ? $"Can't reach the relay at {ServerText}, so your username stays taken there."
+                : $"The relay couldn't close the account ({e.Message}), so your username stays taken there.";
+        }
+        finally
+        {
+            IsLoggingOut = false;
+        }
+    }
+
+    /// <summary>Erases this computer's copy without closing the account on the relay.</summary>
+    [RelayCommand(CanExecute = nameof(CanLogOut))]
+    private void LogOutAnyway() => LoggedOut?.Invoke();
 
     // ---------------------------------------------------------------- groups
 
@@ -515,7 +660,8 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
             return group;
         }
         var contact = Contacts.FirstOrDefault(c => c.IsDirect && c.Username == msg.Peer);
-        if (contact is null) Contacts.Insert(0, contact = new ContactViewModel(msg.Peer));
+        if (contact is null)
+            Contacts.Insert(0, contact = messenger.GetContact(msg.Peer) is { } known ? new ContactViewModel(known) : new ContactViewModel(msg.Peer));
         return contact;
     }
 
@@ -544,6 +690,7 @@ public sealed partial class ShellViewModel(Messenger messenger) : ViewModelBase,
                 shown.Update(changed);
                 _ = LoadImageAsync(shown);
             }
+            RefreshContactStates();
             foreach (var user in result.IdentityChanges) MarkIdentityChanged(user);
             var problems = result.Problems.Where(p => !result.IdentityChanges.Any(u => p.StartsWith(u + "'s safety number"))).ToList();
             if (problems.Count > 0) Notice = string.Join("\n", problems);

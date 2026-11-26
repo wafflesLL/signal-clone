@@ -8,6 +8,8 @@
 
   <Application.DataTemplates>
     <DataTemplate DataType="vm:OnboardingViewModel"><v:OnboardingView /></DataTemplate>
+    <DataTemplate DataType="vm:UnlockViewModel"><v:UnlockView /></DataTemplate>
+    <DataTemplate DataType="vm:AccountsViewModel"><v:AccountsView /></DataTemplate>
     <DataTemplate DataType="vm:ShellViewModel"><v:ShellView /></DataTemplate>
     <DataTemplate DataType="vm:ErrorViewModel"><v:ErrorView /></DataTemplate>
   </Application.DataTemplates>
@@ -36,6 +38,19 @@
     </Style>
     <Style Selector="TextBlock.muted">
       <Setter Property="Opacity" Value="0.65" />
+    </Style>
+    <!-- A text button: "Show more", "Forgot password?" -->
+    <Style Selector="Button.link">
+      <Setter Property="Padding" Value="0,2" />
+      <Setter Property="MinHeight" Value="0" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="FontWeight" Value="SemiBold" />
+      <Setter Property="FontSize" Value="13" />
+      <Setter Property="Foreground" Value="{DynamicResource LinkBrush}" />
+      <Setter Property="Cursor" Value="Hand" />
+    </Style>
+    <Style Selector="Button.link:pointerover /template/ ContentPresenter">
+      <Setter Property="Background" Value="Transparent" />
     </Style>
     <Style Selector="TextBlock.error">
       <Setter Property="Foreground" Value="#D13438" />

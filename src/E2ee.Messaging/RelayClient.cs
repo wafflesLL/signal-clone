@@ -70,6 +70,7 @@ public sealed class RelayClient(HttpClient http)
     private sealed record Ok;
 
     public Task RegisterAsync(RegisterRequest req, CancellationToken ct = default) => Send<Ok>(HttpMethod.Post, "v1/accounts", req, ct);
+    public Task DeleteAccountAsync(CancellationToken ct = default) => Send<Ok>(HttpMethod.Delete, "v1/accounts", null, ct);
     public Task UploadKeysAsync(UploadKeysRequest req, CancellationToken ct = default) => Send<Ok>(HttpMethod.Put, "v1/keys", req, ct);
     public Task<PrekeyStatusResponse> PrekeyStatusAsync(CancellationToken ct = default) => Send<PrekeyStatusResponse>(HttpMethod.Get, "v1/keys/status", null, ct);
     public Task<IdentityResponse> GetIdentityAsync(string user, CancellationToken ct = default) => Send<IdentityResponse>(HttpMethod.Get, $"v1/users/{user}/identity", null, ct);

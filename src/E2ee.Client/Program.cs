@@ -11,8 +11,12 @@ const string Usage = """
     commands:
       register <username>        create keys and claim a username on the relay
       whoami                     show this profile's username and relay
-      add <username>             look up a user and remember their identity key
-      contacts                   list contacts
+      logout                     close the account on the relay (frees the username) and erase this profile
+      add <username>             send a contact request (or accept theirs); you can chat once they accept
+      requests                   list requests waiting for you, and ones you sent
+      accept <username>          accept a contact request
+      decline <username>         decline a request and block the sender (they aren't told)
+      contacts                   list friends
       send <username> <text...>  send one message
       sync                       fetch and print new messages
       history <username> [n]     show the last n messages (default 20)
@@ -65,16 +69,39 @@ var argv = rest.Skip(1).ToList();
 
 string Arg(int i, string name) => i < argv.Count ? argv[i] : throw new MessengerException($"missing <{name}>; see --help");
 
+var options = new MessengerOptions
+{
+    DataDirectory = dataDir,
+    Server = server is null ? null : new Uri(server),
+    KeyStore = keyFile ? new FileMasterKeyStore(dataDir) : null,
+};
+const int LoggedOut = -1;
 try
 {
-    using var m = Messenger.Open(new MessengerOptions
-    {
-        DataDirectory = dataDir,
-        Server = server is null ? null : new Uri(server),
-        KeyStore = keyFile ? new FileMasterKeyStore(dataDir) : null,
-    });
+    int code;
+    using (var m = Messenger.Open(options))
+        code = await Run(m);
+    if (code != LoggedOut) return code;
+    Messenger.DeleteProfile(options); // after the profile is closed
+    Console.WriteLine($"Erased profile {dataDir}");
+    return 0;
+}
+catch (Exception e) when (e is MessengerException or RelayException or IOException or InvalidOperationException)
+{
+    Console.Error.WriteLine($"error: {e.Message}");
+    return 1;
+}
+
+// Returns the exit code, or LoggedOut once the profile should be erased.
+async Task<int> Run(Messenger m)
+{
     switch (command)
     {
+        case "logout":
+            await m.CloseAccountAsync();
+            Console.WriteLine($"Closed {m.Username} on {m.Server}; the username is free again");
+            return LoggedOut;
+
         case "register":
             await m.RegisterAsync(Arg(0, "username"));
             Console.WriteLine($"Registered as {m.Username} on {m.Server}");
@@ -87,11 +114,33 @@ try
 
         case "add":
             var added = await m.AddContactAsync(Arg(0, "username"));
-            Console.WriteLine($"Added {added.Username}");
+            Console.WriteLine(added.IsFriend
+                ? $"You and {added.Username} are friends."
+                : $"Request sent to {added.Username}. You can chat once they accept (run sync to check).");
+            break;
+
+        case "requests":
+        {
+            var waiting = m.Contacts().Where(c => c.State == ContactState.RequestReceived).ToList();
+            var sentReqs = m.Contacts().Where(c => c.State == ContactState.RequestSent).ToList();
+            if (waiting.Count + sentReqs.Count == 0) Console.WriteLine("No requests.");
+            foreach (var c in waiting) Console.WriteLine($"{c.Username} wants to chat  (accept {c.Username} / decline {c.Username})");
+            foreach (var c in sentReqs) Console.WriteLine($"{c.Username}: waiting for them to accept");
+            break;
+        }
+
+        case "accept":
+            var accepted = await m.AcceptRequestAsync(Arg(0, "username"));
+            Console.WriteLine($"You and {accepted.Username} are friends.");
+            break;
+
+        case "decline":
+            var declined = await m.DeclineRequestAsync(Arg(0, "username"));
+            Console.WriteLine($"Declined {declined.Username}. Nothing from them will show up unless you add them yourself.");
             break;
 
         case "contacts":
-            foreach (var c in m.Contacts()) Console.WriteLine(c.Username);
+            foreach (var c in m.Contacts().Where(c => c.IsFriend)) Console.WriteLine(c.Username);
             break;
 
         case "send":
@@ -221,11 +270,6 @@ try
             return 2;
     }
     return 0;
-}
-catch (Exception e) when (e is MessengerException or RelayException)
-{
-    Console.Error.WriteLine($"error: {e.Message}");
-    return 1;
 }
 
 static void WarnIfPlainHttp(Uri server)

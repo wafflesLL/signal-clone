@@ -33,6 +33,7 @@ src/
     Media.cs          attachment and reaction types; which file types are accepted
     LocalStore.cs     encrypted local SQLite database
     MasterKeyStore.cs master key in macOS Keychain / Windows DPAPI / key file
+    PasswordMasterKeyStore.cs  master key locked with the user's password (Argon2id)
     RelayClient.cs    signed HTTP client for the relay
   E2ee.Server/        untrusted relay: ASP.NET Core + SQLite, signed-request auth, push
   E2ee.Client/        CLI over E2ee.Messaging
@@ -80,8 +81,17 @@ Download a build from `dist/` (see [Packaging](#packaging)), or run from source:
 dotnet run --project src/E2ee.App
 ```
 
-The first launch asks for a username and the relay address. To try two people on one
-machine, start a second copy with its own profile:
+The first launch asks for a username, a password, and the relay address (pre-filled with
+the hosted relay, `https://signal-clone.duckdns.org:8443`). The password locks the app on
+this computer: every later launch asks for it before anything is decrypted. It never leaves
+the device and can't be recovered; *Forgot password?* can only erase the account and start
+over.
+
+**Several accounts on one computer.** The unlock screen has *Use another account*, which lists
+the accounts on this computer and can create a new one; each has its own password, and the
+app reopens whichever was used last. (Accounts exist only on the computer where they were
+made: there is nothing to sign in to elsewhere.) To run two people side by side, start a
+second copy with its own profile:
 
 ```bash
 dotnet run --project src/E2ee.App -- --profile bob
@@ -89,14 +99,30 @@ dotnet run --project src/E2ee.App -- --profile bob
 
 Messages arrive instantly: the app keeps one request open on the relay, which answers when
 mail arrives. Options: `--profile NAME`, `--data-dir DIR`, `--server URL` (pre-fills
-sign-up), `--key-file`. The screen must be awake and unlocked when it starts; macOS gives a
+sign-up; so does the `E2EE_SERVER` environment variable), `--key-file`. Builds bake in the
+default relay; change it with `dotnet build -p:DefaultRelay=https://...`. The screen must
+be awake and unlocked when it starts; macOS gives a
 locked session no display to render to.
+
+**Contact requests.** Typing a username under your name sends a request; you can't message
+each other until they accept. Their side shows the chat with a *Request* badge and *Accept* /
+*Decline*. Declining blocks them quietly: they aren't told, and nothing from them (new
+requests included) shows up unless you add them yourself. Only friends can put you in a
+group, and you can only add your friends to one (members don't have to be friends with each
+other), so a member can't pull in someone who never accepted them. The rules run on each device: the relay just carries encrypted messages and never
+learns who is friends with whom, and messages from anyone who isn't your friend are
+dropped unread. CLI: `add`, `requests`, `accept`, `decline`.
 
 **Safety numbers.** Open a conversation and click *Safety number*. Compare the 60 digits
 with what your contact sees on their screen, in person or on a call, then click *Mark as
 verified*. If a contact's identity key ever changes (they reinstalled, or someone is
 impersonating them), the app shows a red *Safety number changed* bar, pauses sending, and
 holds their new messages on the relay until you click *Review* and decide.
+
+**Log out.** *Log out* (top left) closes the account on the relay, which frees the username
+and drops anything still queued for it, then erases this computer's copy: keys, chats,
+files, and contacts. Since the keys exist only here, there is no logging back in; you sign
+up again. The CLI's `logout` does the same.
 
 **Group chats.** Click *New group*, name it, and list the members' usernames. Each message
 is encrypted separately for every member over your one-to-one sessions, so the relay never
@@ -174,8 +200,12 @@ Other commands: `send`, `sync`, `history`, `add`, `contacts`, `safety`, `verify`
 
 Profiles live in `~/Library/Application Support/E2ee/<profile>` on macOS (`%LOCALAPPDATA%\E2ee`
 on Windows, `~/.local/share/E2ee` on Linux). Private keys, sessions, and message history are
-encrypted with a per-profile master key kept in the macOS Keychain or Windows DPAPI; pass
-`--key-file` to keep it in a file in the profile instead. The relay writes `relay.sqlite3`
+encrypted with a per-profile master key. In the desktop app that key is locked with your
+password: Argon2id (64 MiB, 3 passes, random salt) turns the password into a key that
+encrypts the master key with XChaCha20-Poly1305, stored as `master.key.locked`, and a wrong
+password fails its authentication tag. Profiles made by the CLI, or before passwords
+existed, keep the master key in the macOS Keychain or Windows DPAPI; pass `--key-file` to
+keep it in a file in the profile instead. The relay writes `relay.sqlite3`
 (override with the `E2EE_DB` environment variable) and only ever holds public keys and
 ciphertext; attachments in transit sit in `relay-attachments/` next to it.
 
@@ -185,22 +215,32 @@ Screenshots in `docs/screenshots/` come from the UI tests. Regenerate them with
 ## Packaging
 
 ```bash
-scripts/package-app.sh 0.5.0
+scripts/package-app.sh 0.6.0
 ```
 
-This writes self-contained zips to `dist/`, so nobody needs .NET installed:
-`E2EE-Messenger-0.5.0-macOS-arm64.zip` (Apple Silicon), `-macOS-x64.zip` (Intel),
-`-Windows-x64.zip`, `-Linux-x64.zip`, and `E2EE-Relay-0.5.0.zip` (needs the .NET 8 runtime:
-`dotnet E2ee.Server.dll --urls http://0.0.0.0:8000`).
+This writes self-contained downloads to `dist/`, so nobody needs .NET installed. They sign
+up on the hosted relay by default (`DEFAULT_RELAY=https://... scripts/package-app.sh` builds
+for another one):
 
-The builds aren't signed with a developer certificate, so the first launch needs one
+| File | For |
+|---|---|
+| `E2EE-Messenger-0.6.0-macOS-arm64.dmg` | Macs with Apple Silicon (M1 and later) |
+| `E2EE-Messenger-0.6.0-macOS-x64.dmg` | Intel Macs |
+| `E2EE-Messenger-0.6.0-Windows-x64.exe` | Windows 10/11, one portable program |
+| `E2EE-Messenger-0.6.0-Linux-x64.zip` | Linux |
+| `E2EE-Relay-0.6.0.zip` | the relay (needs the .NET 8 runtime; see `deploy/` for a server setup) |
+
+The builds aren't signed with a paid developer certificate, so the first launch needs one
 extra step:
 
-- **macOS:** unzip by double-clicking (Finder keeps the signature intact), move
-  *E2EE Messenger* to Applications, and open it. When macOS blocks it, go to System
-  Settings → Privacy & Security and click *Open Anyway*.
-- **Windows:** unzip, run `E2eeMessenger.exe`, and if SmartScreen appears click
-  *More info* → *Run anyway*.
+- **macOS:** open the `.dmg`, drag *E2EE Messenger* into Applications, and open it. When
+  macOS says it can't check the app, go to System Settings → Privacy & Security and click
+  *Open Anyway* (once).
+- **Windows:** run the `.exe`. If SmartScreen says it protected your PC, click
+  *More info* → *Run anyway* (once). The first start takes a few seconds longer while it
+  unpacks.
+
+The icon is drawn by `scripts/make-icon.py` into `assets/`.
 
 ## Report
 

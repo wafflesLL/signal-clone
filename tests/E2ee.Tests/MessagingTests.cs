@@ -133,7 +133,8 @@ public sealed class MessagingTests : IDisposable
     public async Task UnknownRecipientIsReported()
     {
         var alice = await _relay.Register("alice");
-        await Assert.ThrowsAsync<UserNotFoundException>(() => alice.SendAsync("nobody", "hello?"));
+        await Assert.ThrowsAsync<NotFriendsException>(() => alice.SendAsync("nobody", "hello?"));
+        await Assert.ThrowsAsync<UserNotFoundException>(() => alice.AddContactAsync("nobody"));
     }
 
     [Fact]
@@ -233,6 +234,7 @@ public sealed class MessagingTests : IDisposable
         }
         var newBob = _relay.Open("bob-reinstalled");
         await newBob.RegisterAsync("bob");
+        await newBob.MakeFriendForTestAsync("alice"); // the reinstalled bob still thinks of alice as a friend
         return newBob;
     }
 

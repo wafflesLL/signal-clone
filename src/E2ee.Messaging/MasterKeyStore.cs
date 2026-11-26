@@ -11,6 +11,9 @@ public interface IMasterKeyStore
 {
     /// <summary>Returns the profile's master key, creating and storing one on first use.</summary>
     byte[] GetOrCreate();
+
+    /// <summary>Forgets the key (on log out). Keys kept in the profile directory go with it.</summary>
+    void Delete() { }
 }
 
 public static class MasterKeyStore
@@ -45,6 +48,12 @@ public sealed class MacKeychainMasterKeyStore(string dataDirectory) : IMasterKey
         var (addCode, _) = Run("add-generic-password", "-s", Service, "-a", _account, "-w", Convert.ToHexString(key));
         if (addCode != 0) throw new InvalidOperationException($"Could not save the master key to the Keychain (security exit code {addCode}).");
         return key;
+    }
+
+    public void Delete()
+    {
+        var (code, _) = Run("delete-generic-password", "-s", Service, "-a", _account);
+        if (code is not (0 or 44)) throw new InvalidOperationException($"Could not remove the master key from the Keychain (security exit code {code}).");
     }
 
     private static (int Code, string Output) Run(params string[] args)
@@ -109,5 +118,10 @@ public sealed class InMemoryMasterKeyStore(string name) : IMasterKeyStore
             if (!Keys.TryGetValue(name, out var key)) Keys[name] = key = MasterKeyStore.NewKey();
             return key;
         }
+    }
+
+    public void Delete()
+    {
+        lock (Keys) Keys.Remove(name);
     }
 }

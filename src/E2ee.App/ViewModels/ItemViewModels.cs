@@ -23,6 +23,7 @@ public sealed partial class ContactViewModel : ViewModelBase
     {
         Verified = contact.Verified;
         IdentityChanged = contact.IdentityChanged;
+        State = contact.State;
     }
 
     public ContactViewModel(string username, StoredMessage? last = null)
@@ -77,6 +78,28 @@ public sealed partial class ContactViewModel : ViewModelBase
     /// <summary>The user compared safety numbers with this contact.</summary>
     [ObservableProperty] private bool _verified;
 
+    /// <summary>Friends, or a request one way or the other. Groups count as friends.</summary>
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(IsFriend), nameof(IsIncomingRequest), nameof(IsOutgoingRequest))]
+    private ContactState _state = ContactState.Friend;
+
+    public bool IsFriend => IsGroup || State == ContactState.Friend;
+    public bool IsIncomingRequest => IsDirect && State == ContactState.RequestReceived;
+    public bool IsOutgoingRequest => IsDirect && State == ContactState.RequestSent;
+
+    partial void OnStateChanged(ContactState value)
+    {
+        if (_hasMessages) return;
+        Preview = value switch
+        {
+            ContactState.RequestReceived => "Wants to chat with you",
+            ContactState.RequestSent => "Request sent",
+            _ => "No messages yet",
+        };
+    }
+
+    private bool _hasMessages;
+
     /// <summary>A group's other members.</summary>
     [ObservableProperty]
     [NotifyPropertyChangedFor(nameof(MembersText))]
@@ -99,6 +122,7 @@ public sealed partial class ContactViewModel : ViewModelBase
 
     public void Update(StoredMessage m)
     {
+        _hasMessages = true;
         var who = m.IsEvent ? "" : m.Outgoing ? "You: " : IsGroup ? $"{m.Peer}: " : "";
         var body = m.Text.ReplaceLineEndings(" ");
         if (m.Attachment is { } a) body = $"{a.Icon} " + (body.Length > 0 ? body : a.IsDocument ? a.FileName : a.Kind);
